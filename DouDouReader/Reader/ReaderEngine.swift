@@ -1,0 +1,544 @@
+import CoreGraphics
+import Foundation
+import Observation
+
+struct ReaderPosition: Equatable {
+    var chapterIndex: Int
+    var pageIndex: Int
+}
+
+struct SearchHit: Identifiable, Equatable {
+    var offset: Int
+    var chapterIndex: Int
+    var chapterTitle: String
+    var snippet: String
+
+    var id: Int { offset }
+}
+
+@Observable
+final class ReaderEngine {
+    let source: String
+    let chapters: [ChapterSlice]
+    let speech = SpeechController()
+    let settings: ReaderSettingsStore
+
+    private(set) var position = ReaderPosition(chapterIndex: 0, pageIndex: 0)
+    @ObservationIgnored private(set) var anchorOffset: Int
+    @ObservationIgnored private(set) var pageSize: CGSize = .zero
+    @ObservationIgnored private(set) var layoutRevision = 0
+    private(set) var highlightRange: NSRange?
+    private(set) var autoRunning = false
+    @ObservationIgnored var animateNextTurn = false
+    var showsChrome = false
+
+    @ObservationIgnored var onProgress: ((Int, Int, String) -> Void)?
+    @ObservationIgnored var onHighlight: ((NSRange?) -> Void)?
+
+    @ObservationIgnored private var appliedLayout: LayoutSnapshot
+    @ObservationIgnored private var cache: [CacheKey: ChapterLayout] = [:]
+    @ObservationIgnored private var autoTask: Task<Void, Never>?
+    @ObservationIgnored private var speakingPageRange: NSRange?
+    @ObservationIgnored private var didPrintReady = false
+
+    private struct CacheKey: Hashable {
+        var chapter: Int
+        var width: Int
+        var height: Int
+        var snapshot: LayoutSnapshot
+    }
+
+    init(text: String, fallbackTitle: String, startOffset: Int, settings: ReaderSettingsStore) {
+        let normalized = TextDecoding.normalize(text)
+        source = normalized
+        chapters = ChapterSplitter.split(normalized, fallbackTitle: fallbackTitle)
+        let total = (normalized as NSString).length
+        anchorOffset = min(max(0, startOffset), total)
+        self.settings = settings
+        appliedLayout = settings.layoutSnapshot(interfaceDark: false)
+        speech.onAdvance = { [weak self] step in
+            self?.handleSpeechAdvance(step)
+        }
+        speech.onRange = { [weak self] range in
+            self?.handleSpeechRange(range)
+        }
+    }
+
+    var totalUTF16: Int { (source as NSString).length }
+
+    var isEnd: Bool { position.chapterIndex >= chapters.count }
+
+    var isAutoReading: Bool { autoRunning }
+
+    var currentChapter: ChapterSlice? {
+        guard chapters.indices.contains(position.chapterIndex) else { return nil }
+        return chapters[position.chapterIndex]
+    }
+
+    var currentTitle: String {
+        if isEnd { return "全书完" }
+        return currentChapter?.title ?? ""
+    }
+
+    var pageLabel: String {
+        if isEnd { return "完" }
+        let count = layout(for: position.chapterIndex)?.pageCount ?? 1
+        return "\(position.pageIndex + 1) / \(count)"
+    }
+
+    var percentLabel: String {
+        let total = totalUTF16
+        guard total > 0 else { return "0%" }
+        let percent = min(100, max(0, Int((Double(currentUTF16()) / Double(total) * 100).rounded())))
+        return "\(percent)%"
+    }
+
+    func layout(for chapterIndex: Int) -> ChapterLayout? {
+        guard chapters.indices.contains(chapterIndex) else { return nil }
+        guard pageSize.width > 40, pageSize.height > 40 else { return nil }
+        let key = CacheKey(
+            chapter: chapterIndex,
+            width: Int(pageSize.width.rounded()),
+            height: Int(pageSize.height.rounded()),
+            snapshot: appliedLayout
+        )
+        if let cached = cache[key] { return cached }
+        let chapter = chapters[chapterIndex]
+        let body = ChapterSplitter.substring(source, start: chapter.bodyStart, end: chapter.bodyEnd)
+        let script = ChineseScript(rawValue: appliedLayout.script) ?? .original
+        let theme = ReadingThemes.resolve(id: appliedLayout.themeID, interfaceDark: appliedLayout.interfaceDark)
+        let laid = ChapterLayouter.layout(
+            title: ChineseConverter.convert(chapter.title, to: script),
+            body: ChineseConverter.convert(body, to: script),
+            sourceBodyUTF16: (body as NSString).length,
+            snapshot: appliedLayout,
+            theme: theme,
+            pageSize: pageSize
+        )
+        cache[key] = laid
+        trimCache(around: chapterIndex)
+        return laid
+    }
+
+    func setPageSize(_ size: CGSize) {
+        guard size.width > 40, size.height > 40 else { return }
+        let rounded = CGSize(width: size.width.rounded(), height: size.height.rounded())
+        if abs(rounded.width - pageSize.width) < 0.5, abs(rounded.height - pageSize.height) < 0.5 {
+            return
+        }
+        pageSize = rounded
+        relayoutKeepingOffset()
+    }
+
+    func applySettings(_ settings: ReaderSettingsStore, interfaceDark: Bool) {
+        let snapshot = settings.layoutSnapshot(interfaceDark: interfaceDark)
+        guard snapshot != appliedLayout else { return }
+        appliedLayout = snapshot
+        relayoutKeepingOffset()
+    }
+
+    func go(delta: Int) {
+        guard pageSize.width > 40, pageSize.height > 40, delta != 0 else { return }
+        let target: ReaderPosition
+        if delta > 0 {
+            if let next = neighbor(after: position) {
+                target = next
+            } else if position.chapterIndex < chapters.count {
+                target = ReaderPosition(chapterIndex: chapters.count, pageIndex: 0)
+            } else {
+                return
+            }
+        } else {
+            guard let previous = neighbor(before: position) else { return }
+            target = previous
+        }
+        move(to: target, animated: true)
+        if target.chapterIndex >= chapters.count {
+            haltSpeech()
+            stopAuto()
+            return
+        }
+        if speech.isActive && settings.speechMode == .page {
+            speakCurrentPage()
+        }
+    }
+
+    /// A gesture already displayed this page. Record it without starting another animation.
+    func adopt(position newPosition: ReaderPosition) {
+        animateNextTurn = false
+        guard newPosition != position else { return }
+        position = newPosition
+        commit()
+        if isEnd {
+            haltSpeech()
+            stopAuto()
+            return
+        }
+        if speech.isActive && settings.speechMode == .page {
+            speakCurrentPage()
+        }
+    }
+
+    func seek(to offset: Int) {
+        stopAuto()
+        let clamped = min(max(0, offset), totalUTF16)
+        animateNextTurn = false
+        position = positionFor(offset: clamped)
+        commit()
+        guard speech.isActive else { return }
+        if isEnd {
+            haltSpeech()
+            return
+        }
+        if settings.speechMode == .page {
+            speakCurrentPage()
+        } else {
+            speakCurrentChapter()
+        }
+    }
+
+    func jump(to chapterIndex: Int) {
+        guard chapters.indices.contains(chapterIndex) else { return }
+        seek(to: chapters[chapterIndex].lineStart)
+    }
+
+    func handleTap(xFraction: CGFloat) {
+        if autoRunning {
+            stopAuto()
+            showsChrome = true
+            return
+        }
+        if xFraction < 0.30 {
+            go(delta: -1)
+        } else if xFraction > 0.70 {
+            go(delta: 1)
+        } else {
+            showsChrome.toggle()
+        }
+    }
+
+    func toggleSpeech() {
+        if speech.isActive {
+            haltSpeech()
+            return
+        }
+        stopAuto()
+        guard !isEnd else { return }
+        if settings.speechMode == .page {
+            speakCurrentPage()
+        } else {
+            speakCurrentChapter()
+        }
+    }
+
+    func startAuto() {
+        haltSpeech()
+        autoTask?.cancel()
+        showsChrome = false
+        autoRunning = true
+        autoTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled && self.autoRunning {
+                let nanoseconds = UInt64(max(1, self.settings.autoInterval) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                guard !Task.isCancelled, self.autoRunning else { return }
+                if self.isEnd {
+                    self.stopAuto()
+                    return
+                }
+                self.go(delta: 1)
+                if self.isEnd {
+                    self.stopAuto()
+                    return
+                }
+            }
+        }
+    }
+
+    func stopAuto() {
+        autoTask?.cancel()
+        autoTask = nil
+        if autoRunning {
+            autoRunning = false
+        }
+    }
+
+    func stopActivities() {
+        stopAuto()
+        haltSpeech()
+    }
+
+    func pageExcerpt() -> String {
+        if isEnd { return "全书完" }
+        guard let laid = layout(for: position.chapterIndex) else { return "" }
+        let raw = laid.plainText(page: position.pageIndex)
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let ns = raw as NSString
+        guard ns.length > 42 else { return raw }
+        return ns.substring(to: 42)
+    }
+
+    func search(_ query: String, limit: Int = 80) -> [SearchHit] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return [] }
+        let ns = source as NSString
+        var hits: [SearchHit] = []
+        var location = 0
+        while hits.count < limit && location < ns.length {
+            let found = ns.range(
+                of: needle,
+                options: .caseInsensitive,
+                range: NSRange(location: location, length: ns.length - location)
+            )
+            if found.location == NSNotFound { break }
+            let chapter = chapterIndex(at: found.location)
+            let start = max(0, found.location - 14)
+            let end = min(ns.length, NSMaxRange(found) + 22)
+            let snippet = ns.substring(with: NSRange(location: start, length: end - start))
+                .replacingOccurrences(of: "\n", with: " ")
+            let title = chapters.indices.contains(chapter) ? chapters[chapter].title : ""
+            hits.append(
+                SearchHit(
+                    offset: found.location,
+                    chapterIndex: chapter,
+                    chapterTitle: title,
+                    snippet: snippet
+                )
+            )
+            let next = NSMaxRange(found)
+            location = next > location ? next : location + 1
+        }
+        return hits
+    }
+
+    func chapterIndex(at offset: Int) -> Int {
+        var result = 0
+        for chapter in chapters {
+            if chapter.lineStart <= offset {
+                result = chapter.index
+            } else {
+                break
+            }
+        }
+        return result
+    }
+
+    func positionFor(offset: Int) -> ReaderPosition {
+        guard !chapters.isEmpty else {
+            return ReaderPosition(chapterIndex: 0, pageIndex: 0)
+        }
+        guard pageSize.width > 40, pageSize.height > 40 else {
+            return ReaderPosition(chapterIndex: 0, pageIndex: 0)
+        }
+        if offset >= totalUTF16 {
+            let last = chapters.count - 1
+            let pages = layout(for: last)?.pageCount ?? 1
+            return ReaderPosition(chapterIndex: last, pageIndex: max(pages - 1, 0))
+        }
+        let index = chapterIndex(at: offset)
+        guard chapters.indices.contains(index) else {
+            return ReaderPosition(chapterIndex: 0, pageIndex: 0)
+        }
+        let chapter = chapters[index]
+        guard let laid = layout(for: index) else {
+            return ReaderPosition(chapterIndex: index, pageIndex: 0)
+        }
+        let composed = composedLocation(for: offset, chapter: chapter, layout: laid)
+        var page = 0
+        for (candidate, range) in laid.characterRanges.enumerated() {
+            if range.location <= composed {
+                page = candidate
+            } else {
+                break
+            }
+        }
+        return ReaderPosition(chapterIndex: index, pageIndex: page)
+    }
+
+    func currentUTF16() -> Int {
+        if isEnd { return totalUTF16 }
+        guard let chapter = currentChapter else { return anchorOffset }
+        if position.pageIndex <= 0 { return chapter.lineStart }
+        guard let laid = layout(for: chapter.index),
+              laid.characterRanges.indices.contains(position.pageIndex) else {
+            return chapter.lineStart
+        }
+        return sourceOffset(
+            composed: laid.characterRanges[position.pageIndex].location,
+            chapter: chapter,
+            layout: laid
+        )
+    }
+
+    func composedLocation(for sourceOffset: Int, chapter: ChapterSlice, layout: ChapterLayout) -> Int {
+        if sourceOffset <= chapter.lineStart { return 0 }
+        if sourceOffset <= chapter.bodyStart { return layout.titlePrefix }
+        let into = sourceOffset - chapter.bodyStart
+        let sourceBody = layout.sourceBodyUTF16
+        let composedBody = layout.composedBodyUTF16
+        if sourceBody <= 0 || composedBody <= 0 { return layout.titlePrefix }
+        if sourceBody == composedBody {
+            return layout.titlePrefix + min(into, composedBody)
+        }
+        let mapped = Int((Double(into) / Double(sourceBody) * Double(composedBody)).rounded())
+        return layout.titlePrefix + min(max(mapped, 0), composedBody)
+    }
+
+    func neighbor(after position: ReaderPosition) -> ReaderPosition? {
+        if position.chapterIndex >= chapters.count { return nil }
+        let pages = layout(for: position.chapterIndex)?.pageCount ?? 1
+        if position.pageIndex + 1 < pages {
+            return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: position.pageIndex + 1)
+        }
+        let next = position.chapterIndex + 1
+        guard next < chapters.count else { return nil }
+        return ReaderPosition(chapterIndex: next, pageIndex: 0)
+    }
+
+    func neighbor(before position: ReaderPosition) -> ReaderPosition? {
+        if position.chapterIndex >= chapters.count {
+            guard !chapters.isEmpty else { return nil }
+            let last = chapters.count - 1
+            let pages = layout(for: last)?.pageCount ?? 1
+            return ReaderPosition(chapterIndex: last, pageIndex: max(pages - 1, 0))
+        }
+        if position.pageIndex > 0 {
+            return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: position.pageIndex - 1)
+        }
+        let previous = position.chapterIndex - 1
+        guard previous >= 0 else { return nil }
+        let pages = layout(for: previous)?.pageCount ?? 1
+        return ReaderPosition(chapterIndex: previous, pageIndex: max(pages - 1, 0))
+    }
+
+    private func sourceOffset(composed: Int, chapter: ChapterSlice, layout: ChapterLayout) -> Int {
+        if composed <= 0 { return chapter.lineStart }
+        if composed <= layout.titlePrefix { return chapter.bodyStart }
+        let into = composed - layout.titlePrefix
+        let sourceBody = layout.sourceBodyUTF16
+        let composedBody = layout.composedBodyUTF16
+        if sourceBody <= 0 || composedBody <= 0 { return chapter.bodyStart }
+        if sourceBody == composedBody {
+            return min(chapter.bodyStart + into, chapter.bodyEnd)
+        }
+        let mapped = Int((Double(into) / Double(max(composedBody, 1)) * Double(sourceBody)).rounded())
+        return min(max(chapter.bodyStart + mapped, chapter.bodyStart), chapter.bodyEnd)
+    }
+
+    private func move(to target: ReaderPosition, animated: Bool) {
+        animateNextTurn = animated
+        position = target
+        commit()
+    }
+
+    private func commit() {
+        anchorOffset = currentUTF16()
+        let index = min(max(position.chapterIndex, 0), max(chapters.count - 1, 0))
+        let title = isEnd ? (chapters.last?.title ?? "") : (currentChapter?.title ?? "")
+        onProgress?(index, anchorOffset, title)
+    }
+
+    private func relayoutKeepingOffset() {
+        cache.removeAll()
+        guard pageSize.width > 40, pageSize.height > 40 else { return }
+        animateNextTurn = false
+        position = positionFor(offset: anchorOffset)
+        layoutRevision += 1
+        commit()
+        noteReady()
+    }
+
+    private func trimCache(around chapter: Int) {
+        guard cache.count > 6 else { return }
+        cache = cache.filter { abs($0.key.chapter - chapter) <= 1 }
+    }
+
+    private func speakCurrentPage() {
+        guard !isEnd, let laid = layout(for: position.chapterIndex) else { return }
+        let text = laid.plainText(page: position.pageIndex)
+        if laid.characterRanges.indices.contains(position.pageIndex) {
+            speakingPageRange = laid.characterRanges[position.pageIndex]
+        } else {
+            speakingPageRange = nil
+        }
+        speech.start(
+            parts: [text],
+            mode: .page,
+            rate: Float(settings.speechRate),
+            sleepMinutes: settings.sleepMinutes,
+            highlight: true
+        )
+    }
+
+    private func speakCurrentChapter() {
+        guard let chapter = currentChapter else { return }
+        speakingPageRange = nil
+        if highlightRange != nil {
+            highlightRange = nil
+            onHighlight?(nil)
+        }
+        let script = ChineseScript(rawValue: appliedLayout.script) ?? .original
+        let raw = ChapterSplitter.substring(source, start: chapter.bodyStart, end: chapter.bodyEnd)
+        let body = ChapterTextBuilder.plainParagraphs(
+            ChineseConverter.convert(raw, to: script),
+            blockWords: appliedLayout.blockWords
+        )
+        let title = ChineseConverter.convert(chapter.title, to: script)
+        let spoken = body.isEmpty ? title : title + "。\n" + body
+        speech.start(
+            parts: [spoken],
+            mode: .chapter,
+            rate: Float(settings.speechRate),
+            sleepMinutes: settings.sleepMinutes,
+            highlight: false
+        )
+    }
+
+    private func handleSpeechAdvance(_ step: SpeechController.Advance) {
+        switch step {
+        case .none:
+            break
+        case .page:
+            go(delta: 1)
+        case .chapter:
+            let nextIndex = position.chapterIndex + 1
+            guard nextIndex < chapters.count else {
+                haltSpeech()
+                return
+            }
+            animateNextTurn = true
+            position = ReaderPosition(chapterIndex: nextIndex, pageIndex: 0)
+            commit()
+            speakCurrentChapter()
+        }
+    }
+
+    private func handleSpeechRange(_ range: NSRange) {
+        let next: NSRange?
+        if let base = speakingPageRange, range.length > 0, speech.isActive {
+            next = NSRange(location: base.location + range.location, length: range.length)
+        } else {
+            next = nil
+        }
+        guard highlightRange != next else { return }
+        highlightRange = next
+        onHighlight?(next)
+    }
+
+    private func haltSpeech() {
+        speakingPageRange = nil
+        speech.stop()
+        if highlightRange != nil {
+            highlightRange = nil
+            onHighlight?(nil)
+        }
+    }
+
+    private func noteReady() {
+        guard !didPrintReady else { return }
+        guard ProcessInfo.processInfo.arguments.contains("-openSample") else { return }
+        didPrintReady = true
+        print("READER_READY")
+    }
+}
