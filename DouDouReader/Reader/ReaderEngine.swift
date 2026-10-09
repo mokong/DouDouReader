@@ -18,10 +18,15 @@ struct SearchHit: Identifiable, Equatable {
 
 @Observable
 final class ReaderEngine {
-    let source: String
-    let chapters: [ChapterSlice]
+    private(set) var source: String
+    private(set) var chapters: [ChapterSlice]
     let speech = SpeechController()
     let settings: ReaderSettingsStore
+    var hasUnloadedChapters = false
+    @ObservationIgnored var onNeedNextChapter: (() -> Void)?
+    @ObservationIgnored private var askedForNext = false
+    @ObservationIgnored private var nextChapterFailed = false
+    @ObservationIgnored private var failedAt: ReaderPosition?
 
     private(set) var position = ReaderPosition(chapterIndex: 0, pageIndex: 0)
     @ObservationIgnored private(set) var anchorOffset: Int
@@ -76,8 +81,18 @@ final class ReaderEngine {
     }
 
     var currentTitle: String {
-        if isEnd { return "全书完" }
+        if isEnd { return endTitle }
         return currentChapter?.title ?? ""
+    }
+
+    var endTitle: String {
+        if nextChapterFailed { return "下一章加载失败" }
+        return hasUnloadedChapters ? "正在加载下一章" : "全书完"
+    }
+
+    var endDetail: String {
+        if nextChapterFailed { return "返回后再次翻页" }
+        return hasUnloadedChapters ? "请稍等" : "这本读完了"
     }
 
     var pageLabel: String {
@@ -268,8 +283,52 @@ final class ReaderEngine {
         haltSpeech()
     }
 
+    func appendLoadedChapter(title: String, body: String) -> Bool {
+        let cleaned = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return false }
+        let oldCount = chapters.count
+        let viewingEnd = position.chapterIndex >= oldCount
+        let separator = source.isEmpty || source.hasSuffix("\n") ? "" : "\n"
+        let titleStart = (source as NSString).length + (separator as NSString).length
+        source += "\(separator)\(title)\n\(cleaned)\n"
+        let bodyStart = titleStart + (title as NSString).length + 1
+        let bodyEnd = (source as NSString).length
+        if chapters.indices.contains(oldCount - 1) {
+            chapters[oldCount - 1].bodyEnd = titleStart
+        }
+        chapters.append(
+            ChapterSlice(
+                index: oldCount,
+                title: title,
+                lineStart: titleStart,
+                bodyStart: min(bodyStart, bodyEnd),
+                bodyEnd: bodyEnd
+            )
+        )
+        cache.removeAll()
+        layoutRevision += 1
+        askedForNext = false
+        nextChapterFailed = false
+        failedAt = nil
+        if viewingEnd {
+            animateNextTurn = true
+            position = ReaderPosition(chapterIndex: oldCount, pageIndex: 0)
+        }
+        commit()
+        return true
+    }
+
+    func noteNextChapterFailed() {
+        askedForNext = false
+        nextChapterFailed = true
+        failedAt = position
+        if isEnd {
+            layoutRevision += 1
+        }
+    }
+
     func pageExcerpt() -> String {
-        if isEnd { return "全书完" }
+        if isEnd { return endTitle }
         guard let laid = layout(for: position.chapterIndex) else { return "" }
         let raw = laid.plainText(page: position.pageIndex)
             .replacingOccurrences(of: "\n", with: " ")
@@ -436,7 +495,26 @@ final class ReaderEngine {
         anchorOffset = currentUTF16()
         let index = min(max(position.chapterIndex, 0), max(chapters.count - 1, 0))
         let title = isEnd ? (chapters.last?.title ?? "") : (currentChapter?.title ?? "")
+        if nextChapterFailed, failedAt != position {
+            nextChapterFailed = false
+            failedAt = nil
+        }
         onProgress?(index, anchorOffset, title)
+        requestNextIfNeeded()
+    }
+
+    private var isOnLastLoadedPage: Bool {
+        guard !chapters.isEmpty, position.chapterIndex == chapters.count - 1 else { return false }
+        let pages = layout(for: position.chapterIndex)?.pageCount ?? 1
+        return position.pageIndex >= pages - 1
+    }
+
+    private func requestNextIfNeeded() {
+        guard hasUnloadedChapters, !askedForNext, !nextChapterFailed else { return }
+        guard pageSize.width > 40, pageSize.height > 40 else { return }
+        guard isOnLastLoadedPage else { return }
+        askedForNext = true
+        onNeedNextChapter?()
     }
 
     private func relayoutKeepingOffset() {

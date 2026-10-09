@@ -17,6 +17,11 @@ final class BookRecord {
     var utf16Offset: Int = 0
     var totalUTF16: Int = 0
     var currentChapterTitle: String = ""
+    /// 在线书的章节目录。空字符串表示本地整本，不需要再向书源要下一章。
+    var remoteChapterList: String = ""
+    var remoteBookID: String = ""
+    var remoteSourceID: String = ""
+    var loadedChapterCount: Int = 0
 
     @Relationship(deleteRule: .cascade, inverse: \BookmarkRecord.book)
     var bookmarks: [BookmarkRecord] = []

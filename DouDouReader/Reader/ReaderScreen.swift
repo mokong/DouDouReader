@@ -268,11 +268,47 @@ struct ReaderScreen: View {
                 book.lastReadAt = Date()
                 try? modelContext.save()
             }
+            let remoteChapters = RemoteChapterList.decode(book.remoteChapterList)
+            created.hasUnloadedChapters = book.loadedChapterCount < remoteChapters.count
+            created.onNeedNextChapter = { [weak created] in
+                guard let created else { return }
+                Task { @MainActor in
+                    await self.loadNextChapter(into: created)
+                }
+            }
             created.applySettings(settings, interfaceDark: deviceColorScheme == .dark)
             engine = created
             updateIdleTimer()
         } catch {
             loadError = "这本书的文件打不开"
+        }
+    }
+
+    private func loadNextChapter(into engine: ReaderEngine) async {
+        let chapters = RemoteChapterList.decode(book.remoteChapterList)
+        let index = book.loadedChapterCount
+        guard chapters.indices.contains(index) else {
+            engine.hasUnloadedChapters = false
+            return
+        }
+        do {
+            let records = (try? modelContext.fetch(FetchDescriptor<SourceRecord>())) ?? []
+            guard let item = BookSourceLibrary.switchable(records: records).first(where: { $0.id == book.remoteSourceID }),
+                  let catalog = BookSourceLibrary.catalog(for: item) as? IncrementalBookCatalog else {
+                throw SourceError.unreachable
+            }
+            let body = try await catalog.fetchChapterText(url: chapters[index].url)
+            guard engine.appendLoadedChapter(title: chapters[index].title, body: body) else {
+                throw SourceError.emptyBook
+            }
+            try BookStorage.overwrite(fileName: book.fileName, text: engine.source)
+            book.loadedChapterCount += 1
+            book.totalUTF16 = engine.totalUTF16
+            book.contentHash = BookLibrary.hash(engine.source)
+            engine.hasUnloadedChapters = book.loadedChapterCount < chapters.count
+            try? modelContext.save()
+        } catch {
+            engine.noteNextChapterFailed()
         }
     }
 
@@ -408,9 +444,9 @@ struct MacPageView: View {
     private func page(_ engine: ReaderEngine) -> some View {
         if engine.isEnd {
             VStack(spacing: 8) {
-                Text("全书完")
+                Text(engine.endTitle)
                     .font(.title2.bold())
-                Text("这本读完了")
+                Text(engine.endDetail)
                     .foregroundStyle(theme.secondary.color)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

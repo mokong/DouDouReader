@@ -8,14 +8,25 @@ final class SourceRecord {
     var baseURL: String = ""
     var enabled: Bool = true
     var addedAt: Date = Date()
+    var format: String = "doudou"
+    var rawJSON: String = ""
 
-    init(name: String, baseURL: String) {
+    init(name: String, baseURL: String, format: String = "doudou", rawJSON: String = "") {
         self.id = UUID()
         self.name = name
         self.baseURL = baseURL
         self.enabled = true
         self.addedAt = Date()
+        self.format = format
+        self.rawJSON = rawJSON
     }
+}
+
+nonisolated struct OnlineOpening: Sendable {
+    var title: String
+    var author: String
+    var text: String
+    var chapters: [RemoteChapterRef]
 }
 
 nonisolated struct CatalogBook: Identifiable, Equatable, Sendable {
@@ -23,22 +34,28 @@ nonisolated struct CatalogBook: Identifiable, Equatable, Sendable {
     var title: String
     var author: String
     var summary: String
+    var category: String = ""
+    var status: String = ""
 }
 
-nonisolated enum SourceError: LocalizedError {
+nonisolated enum SourceError: LocalizedError, Equatable {
     case badURL
     case badResponse
     case notFound
     case emptyBook
     case unreachable
+    case detailedUnreachable(String)
+    case detailedBadResponse(String)
 
     var errorDescription: String? {
         switch self {
         case .badURL: "书源地址需要是 https，或本机局域网的 http"
-        case .badResponse: "书源没有返回可用的 JSON"
+        case .badResponse: "书源没有返回可用的响应"
         case .notFound: "书源里没有这本书"
         case .emptyBook: "这本书没有正文"
         case .unreachable: "连不上这本书源"
+        case .detailedUnreachable(let msg): "连不上书源：\(msg)"
+        case .detailedBadResponse(let msg): "书源响应异常：\(msg)"
         }
     }
 }
@@ -219,6 +236,12 @@ nonisolated protocol BookCatalog {
     func fetchText(bookID: String, progress: (@Sendable (Int, Int) -> Void)?) async throws -> (title: String, text: String)
 }
 
+/// 点开一本书只给第一章。后面的章节按目录地址单独取。
+nonisolated protocol IncrementalBookCatalog: BookCatalog {
+    func fetchOpening(bookID: String) async throws -> OnlineOpening
+    func fetchChapterText(url: String) async throws -> String
+}
+
 nonisolated struct SampleBookCatalog: BookCatalog {
     static let stableID = "builtin.doudou"
     let id = SampleBookCatalog.stableID
@@ -245,7 +268,7 @@ nonisolated struct SampleBookCatalog: BookCatalog {
     }
 }
 
-nonisolated struct RemoteBookCatalog: BookCatalog {
+nonisolated struct RemoteBookCatalog: IncrementalBookCatalog {
     var id: String
     var name: String
     var baseURL: URL
@@ -266,14 +289,10 @@ nonisolated struct RemoteBookCatalog: BookCatalog {
         var total = 0
         for (index, chapter) in detail.chapters.enumerated() {
             progress?(index + 1, detail.chapters.count)
-            guard let url = SourceEndpoint.chapter(baseURL, bookID: bookID, chapterID: chapter.id) else {
-                throw SourceError.badURL
-            }
-            let body = try CatalogParser.chapter(from: try await load(url))
+            let body = try await loadRemoteChapter(bookID: bookID, chapter: chapter)
             total += body.content.utf8.count
             if total > BookStorage.byteLimit { throw ImportError.tooLarge }
-            let title = body.title.trimmingCharacters(in: .whitespacesAndNewlines)
-            chapters.append((title.isEmpty ? chapter.title : title, body.content))
+            chapters.append((body.title, body.content))
         }
         let text = CatalogText.assemble(author: detail.author, chapters: chapters)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw SourceError.emptyBook }
@@ -281,22 +300,82 @@ nonisolated struct RemoteBookCatalog: BookCatalog {
         return (title.isEmpty ? "未命名" : title, text)
     }
 
+    func fetchOpening(bookID: String) async throws -> OnlineOpening {
+        guard let detailURL = SourceEndpoint.book(baseURL, id: bookID) else { throw SourceError.badURL }
+        let detail = try CatalogParser.detail(from: try await load(detailURL))
+        guard let first = detail.chapters.first else { throw SourceError.emptyBook }
+        let body = try await loadRemoteChapter(bookID: bookID, chapter: first)
+        let text = CatalogText.assemble(author: detail.author, chapters: [(body.title, body.content)])
+        guard !body.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw SourceError.emptyBook
+        }
+        let refs = detail.chapters.compactMap { chapter -> RemoteChapterRef? in
+            guard let url = SourceEndpoint.chapter(baseURL, bookID: bookID, chapterID: chapter.id) else { return nil }
+            let title = chapter.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return RemoteChapterRef(title: title.isEmpty ? "章节" : title, url: url.absoluteString)
+        }
+        let title = detail.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return OnlineOpening(
+            title: title.isEmpty ? "未命名" : title,
+            author: detail.author,
+            text: text,
+            chapters: refs
+        )
+    }
+
+    func fetchChapterText(url: String) async throws -> String {
+        guard let chapterURL = URL(string: url) else { throw SourceError.badURL }
+        let body = try CatalogParser.chapter(from: try await load(chapterURL))
+        let content = body.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { throw SourceError.emptyBook }
+        return content
+    }
+
+    private func loadRemoteChapter(bookID: String, chapter: CatalogChapterRef) async throws -> (title: String, content: String) {
+        guard let url = SourceEndpoint.chapter(baseURL, bookID: bookID, chapterID: chapter.id) else {
+            throw SourceError.badURL
+        }
+        let body = try CatalogParser.chapter(from: try await load(url))
+        let title = body.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (title.isEmpty ? chapter.title : title, body.content)
+    }
+
     private func load(_ url: URL) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        if let host = url.host {
+            let scheme = url.scheme ?? "https"
+            request.setValue("\(scheme)://\(host)/", forHTTPHeaderField: "Referer")
+        }
+        let host = url.host ?? "书源服务器"
         let data: Data
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
         } catch let error as SourceError {
             throw error
+        } catch let urlError as URLError {
+            switch urlError.code {
+            case .timedOut:
+                throw SourceError.detailedUnreachable("连接超时（\(host) 响应超时）")
+            case .cannotFindHost:
+                throw SourceError.detailedUnreachable("找不到主机（\(host) DNS 解析失败）")
+            case .cannotConnectToHost:
+                throw SourceError.detailedUnreachable("无法连接到服务器（\(host) 拒绝连接）")
+            case .notConnectedToInternet:
+                throw SourceError.detailedUnreachable("当前设备未连接互联网，请检查网络设置")
+            default:
+                throw SourceError.detailedUnreachable("网络请求失败: \(urlError.localizedDescription)")
+            }
         } catch {
-            throw SourceError.unreachable
+            throw SourceError.detailedUnreachable("连接书源失败: \(error.localizedDescription)")
         }
         guard let http = response as? HTTPURLResponse else { throw SourceError.badResponse }
         if http.statusCode == 404 { throw SourceError.notFound }
-        guard (200..<300).contains(http.statusCode) else { throw SourceError.badResponse }
+        if http.statusCode == 403 { throw SourceError.detailedBadResponse("HTTP 403 Forbidden（无权限或已被拦截）") }
+        guard (200..<300).contains(http.statusCode) else { throw SourceError.detailedBadResponse("HTTP 状态码 \(http.statusCode)") }
         guard data.count <= BookStorage.byteLimit else { throw ImportError.tooLarge }
         return data
     }
@@ -306,6 +385,12 @@ enum BookCatalogs {
     static func enabled(records: [SourceRecord]) -> [BookCatalog] {
         var catalogs: [BookCatalog] = [SampleBookCatalog()]
         for record in records where record.enabled {
+            if record.format == BookSourceKind.legado.rawValue || record.format == BookSourceKind.xiangse.rawValue {
+                if let source = try? BookSourceParser.decodeSingleSource(json: record.rawJSON) {
+                    catalogs.append(RuleBasedBookCatalog(recordID: record.id.uuidString, source: source))
+                    continue
+                }
+            }
             guard let url = SourceURL.parse(record.baseURL) else { continue }
             let name = record.name.trimmingCharacters(in: .whitespacesAndNewlines)
             catalogs.append(

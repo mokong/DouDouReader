@@ -213,6 +213,8 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
             theme: theme,
             textRect: textRect,
             terminal: terminal,
+            terminalTitle: engine.endTitle,
+            terminalDetail: engine.endDetail,
             fontName: settings.fontName
         )
         if position == engine.position {
@@ -292,6 +294,8 @@ final class PageContentController: UIViewController {
         theme: ReadingTheme,
         textRect: CGRect,
         terminal: Bool,
+        terminalTitle: String,
+        terminalDetail: String,
         fontName: String
     ) {
         self.position = position
@@ -301,10 +305,10 @@ final class PageContentController: UIViewController {
         canvas.chapterLayout = chapterLayout
         canvas.pageIndex = position.pageIndex
         canvas.isHidden = terminal
-        titleLabel.text = "全书完"
+        titleLabel.text = terminalTitle
         titleLabel.textAlignment = .center
         titleLabel.font = PlatformFont.make(name: fontName, size: 22, bold: true)
-        detailLabel.text = "这本读完了"
+        detailLabel.text = terminalDetail
         detailLabel.textAlignment = .center
         detailLabel.font = PlatformFont.make(name: fontName, size: 15)
         titleLabel.isHidden = !terminal

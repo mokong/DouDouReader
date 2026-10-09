@@ -89,6 +89,11 @@ enum BookStorage {
         return TextDecoding.normalize(text)
     }
 
+    static func overwrite(fileName: String, text: String) throws {
+        guard text.utf8.count <= byteLimit else { throw ImportError.tooLarge }
+        try Data(text.utf8).write(to: fileURL(fileName), options: .atomic)
+    }
+
     static func delete(fileName: String) {
         try? FileManager.default.removeItem(at: fileURL(fileName))
     }
@@ -123,6 +128,21 @@ enum ShelfGroups {
         guard !custom.contains(trimmed) else { return }
         custom.append(trimmed)
         UserDefaults.standard.set(custom, forKey: customKey)
+    }
+}
+
+enum RemoteChapterList {
+    static func encode(_ chapters: [RemoteChapterRef]) -> String {
+        guard let data = try? JSONEncoder().encode(chapters) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func decode(_ raw: String) -> [RemoteChapterRef] {
+        guard let data = raw.data(using: .utf8),
+              let chapters = try? JSONDecoder().decode([RemoteChapterRef].self, from: data) else {
+            return []
+        }
+        return chapters
     }
 }
 
@@ -171,6 +191,48 @@ enum BookLibrary {
             suggestedTitle: BookMetadata.title(from: url.lastPathComponent),
             context: context
         )
+    }
+
+    static func existingRemote(bookID: String, context: ModelContext) -> BookRecord? {
+        let needle = bookID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
+        let books = (try? context.fetch(FetchDescriptor<BookRecord>())) ?? []
+        return books.first { $0.remoteBookID == needle }
+    }
+
+    static func importOnline(
+        text raw: String,
+        suggestedTitle: String,
+        remoteBookID: String,
+        remoteSourceID: String,
+        chapters: [RemoteChapterRef],
+        context: ModelContext
+    ) throws -> ImportedBook {
+        if let existing = existingRemote(bookID: remoteBookID, context: context) {
+            return ImportedBook(book: existing, isNew: false)
+        }
+        let text = TextDecoding.normalize(raw)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ImportError.empty
+        }
+        let fileName = try BookStorage.write(text)
+        let trimmed = suggestedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = trimmed.isEmpty ? "未命名" : trimmed
+        let book = BookRecord(
+            title: title,
+            author: BookMetadata.author(in: text),
+            fileName: fileName,
+            contentHash: hash(text),
+            coverHue: BookMetadata.coverHue(for: title),
+            totalUTF16: (text as NSString).length
+        )
+        book.remoteBookID = remoteBookID
+        book.remoteSourceID = remoteSourceID
+        book.remoteChapterList = RemoteChapterList.encode(chapters)
+        book.loadedChapterCount = min(1, chapters.count)
+        context.insert(book)
+        try context.save()
+        return ImportedBook(book: book, isNew: true)
     }
 
     static func delete(_ book: BookRecord, context: ModelContext) throws {

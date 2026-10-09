@@ -29,12 +29,15 @@ enum LogicChecks {
         checkSplitter(&errors)
         checkPaginator(&errors)
         checkEngine(&errors)
+        checkLazyChapter(&errors)
         checkEncoding(&errors)
         checkAuthor(&errors)
         checkBlockWords(&errors)
         checkSample(&errors)
         checkConversion(&errors)
         checkSources(&errors)
+        checkTransportPolicy(&errors)
+        checkBookSourceParsing(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -181,6 +184,80 @@ enum LogicChecks {
         }
     }
 
+    /// 读到已加载章节的最后一页才要下一章。人还在本章时，新章节接在后面，不把进度拽走。
+    private static func checkLazyChapter(_ errors: inout [String]) {
+        let settings = ReaderSettingsStore(loadSaved: false)
+        let paragraph = String(repeating: "字", count: 800)
+        let engine = ReaderEngine(text: "第一章 甲\n\(paragraph)\n", fallbackTitle: "测", startOffset: 0, settings: settings)
+        engine.hasUnloadedChapters = true
+        var asks = 0
+        engine.onNeedNextChapter = { asks += 1 }
+        engine.setPageSize(CGSize(width: 180, height: 240))
+        guard let layout = engine.layout(for: 0), layout.pageCount >= 2 else {
+            errors.append("懒加载测试第一章应当超过一页")
+            return
+        }
+        if asks != 0 {
+            errors.append("还没到章末就去要下一章")
+        }
+        if engine.endTitle != "正在加载下一章" {
+            errors.append("还有后续章节时文末提示不对")
+        }
+        while engine.position.pageIndex < layout.pageCount - 1, !engine.isEnd {
+            engine.go(delta: 1)
+        }
+        if asks != 1 {
+            errors.append("章末没有请求下一章 \(asks)")
+            return
+        }
+        let stayed = engine.position
+        guard engine.appendLoadedChapter(title: "第二章 乙", body: paragraph) else {
+            errors.append("追加下一章失败")
+            return
+        }
+        if engine.position != stayed {
+            errors.append("还在本章时追加不该把读者带走")
+        }
+        if engine.chapters.count != 2 || engine.chapters[1].title != "第二章 乙" {
+            errors.append("追加后的章节不对")
+        }
+        if asks != 1 {
+            errors.append("追加后不该立刻再要一章")
+        }
+        engine.hasUnloadedChapters = false
+        var guardCount = 0
+        while !engine.isEnd, guardCount < 400 {
+            engine.go(delta: 1)
+            guardCount += 1
+        }
+        if !engine.isEnd || engine.endTitle != "全书完" {
+            errors.append("没有后续章节时应走到全书完")
+        }
+        if asks != 1 {
+            errors.append("没有后续章节时不该再请求")
+        }
+
+        let tail = ReaderEngine(text: "第一章 甲\n很短。\n", fallbackTitle: "测", startOffset: 0, settings: settings)
+        tail.hasUnloadedChapters = true
+        tail.setPageSize(CGSize(width: 180, height: 240))
+        guard tail.layout(for: 0)?.pageCount == 1 else {
+            errors.append("短章应当只有一页")
+            return
+        }
+        tail.go(delta: 1)
+        if !tail.isEnd || tail.endTitle != "正在加载下一章" {
+            errors.append("短章翻过最后一页应停在加载页")
+            return
+        }
+        guard tail.appendLoadedChapter(title: "第二章 乙", body: "新的一章。") else {
+            errors.append("加载页追加失败")
+            return
+        }
+        if tail.position != ReaderPosition(chapterIndex: 1, pageIndex: 0) || tail.isEnd {
+            errors.append("停在加载页时追加应进入新章")
+        }
+    }
+
     private static func checkEncoding(_ errors: inout [String]) {
         if TextDecoding.normalize("\u{FEFF}a\r\nb\rc") != "a\nb\nc" {
             errors.append("换行和 BOM 没有整理干净")
@@ -241,6 +318,22 @@ enum LogicChecks {
         }
         if ChineseConverter.convert("后", to: .original) != "后" {
             errors.append("原文模式不应改字")
+        }
+    }
+
+    /// 书源大量使用明文 HTTP。局部 ATS 例外会让全局放行失效。
+    private static func checkTransportPolicy(_ errors: inout [String]) {
+        let ats = Bundle.main.infoDictionary?["NSAppTransportSecurity"] as? [String: Any]
+        if (ats?["NSAllowsArbitraryLoads"] as? Bool) != true {
+            errors.append("ATS 没有允许明文 HTTP，书源会被系统拦截")
+        }
+        let overriding = [
+            "NSAllowsLocalNetworking",
+            "NSAllowsArbitraryLoadsInWebContent",
+            "NSAllowsArbitraryLoadsForMedia"
+        ].filter { ats?[$0] != nil }
+        if overriding.isEmpty != true {
+            errors.append("ATS 局部例外会让明文放行失效 \(overriding)")
         }
     }
 
@@ -361,11 +454,799 @@ enum LogicChecks {
             if !remoteTitles.contains("第一章 来信") || !remoteTitles.contains("第二章 回信") || probe.marks != ["1/2", "2/2"] {
                 errors.append("远端书源章节不符 \(remoteTitles) \(probe.marks)")
             }
+            if probe.openingCount != 2
+                || !probe.openingText.contains("信封是湿的。")
+                || probe.openingText.contains("灯塔亮了一夜。")
+                || !probe.openingNext.contains("灯塔亮了一夜。") {
+                errors.append("点开远端书应当只带第一章")
+            }
             if !probe.missingIsNotFound || !probe.badJSON {
                 errors.append("远端书源的错误结果不对")
             }
         }
         CatalogURLStub.setRoutes([:])
+    }
+
+    private static func checkBookSourceParsing(_ errors: inout [String]) {
+        // 1. 测试阅读 3.0 (Legado) 单源与数组解析
+        let legadoJSON = """
+        [
+          {
+            "bookSourceName": "测试笔趣阁",
+            "bookSourceUrl": "https://biquge.test",
+            "bookSourceGroup": "阅读精选",
+            "searchUrl": "https://biquge.test/search?keyword={{key}}",
+            "ruleSearch": {
+              "bookList": ".search-list .item",
+              "name": ".title@text",
+              "author": ".author@text",
+              "bookUrl": ".title a@href",
+              "intro": ".desc@text"
+            },
+            "ruleToc": {
+              "chapterList": ".chapters a",
+              "chapterName": "text",
+              "chapterUrl": "href"
+            },
+            "ruleContent": {
+              "content": "#content@text",
+              "replaceRegex": "##广告.*##"
+            }
+          }
+        ]
+        """
+        do {
+            let parsed = try BookSourceParser.parse(text: legadoJSON)
+            if parsed.count != 1 {
+                errors.append("阅读 3.0 书源解析数量不为 1")
+            } else {
+                let first = parsed[0]
+                if first.kind != .legado || first.name != "测试笔趣阁" || first.group != "阅读精选" {
+                    errors.append("阅读 3.0 书源元数据不符")
+                }
+                if first.searchRule.urlTemplate != "https://biquge.test/search?keyword={{key}}" {
+                    errors.append("阅读 3.0 搜索模板不符")
+                }
+                if first.searchRule.nameSelector != ".title@text" || first.contentRule.replaceRules != ["##广告.*##"] {
+                    errors.append("阅读 3.0 规则选择器不符")
+                }
+            }
+        } catch {
+            errors.append("阅读 3.0 JSON 解析失败：\(error)")
+        }
+
+        // 2. 测试香色闺阁 (XiangSe) alias 字典格式解析
+        let xiangseJSON = """
+        {
+          "bato-v1": {
+            "sourceName": "测试香色源",
+            "sourceUrl": "https://xiangse.test",
+            "sourceType": "text",
+            "weight": "8888",
+            "searchBook": {
+              "actionID": "searchBook",
+              "requestInfo": "https://xiangse.test/search?word=%@keyWord&page=%@pageIndex",
+              "list": "//ul[@id='result']/li",
+              "bookName": "//h2/a/text()",
+              "author": "//span[@class='author']/text()",
+              "detailUrl": "//h2/a/@href",
+              "desc": "//p[@class='intro']/text()"
+            },
+            "chapterList": {
+              "actionID": "chapterList",
+              "list": "//div[@id='chapters']/a",
+              "title": "//text()",
+              "url": "//@href"
+            },
+            "chapterContent": {
+              "actionID": "chapterContent",
+              "content": "//div[@id='content']/text()"
+            }
+          }
+        }
+        """
+        do {
+            let parsed = try BookSourceParser.parse(text: xiangseJSON)
+            if parsed.count != 1 {
+                errors.append("香色闺阁书源解析数量不为 1")
+            } else {
+                let first = parsed[0]
+                if first.kind != .xiangse || first.name != "测试香色源" || first.weight != 8888 {
+                    errors.append("香色闺阁元数据不符")
+                }
+                if !first.searchRule.urlTemplate.contains("word=%@keyWord") {
+                    errors.append("香色闺阁搜索链接模板不符")
+                }
+                if first.searchRule.listSelector != "//ul[@id='result']/li" {
+                    errors.append("香色闺阁搜索列表选择器不符")
+                }
+                if !first.exploreRule.urlTemplate.isEmpty {
+                    errors.append("没有发现规则的香色书源不应带发现地址")
+                }
+            }
+        } catch {
+            errors.append("香色闺阁 JSON 解析失败：\(error)")
+        }
+
+        checkSourceSwitch(&errors)
+
+        // 3. 测试 HTMLMiniParser 与选择器引擎
+        let sampleHTML = """
+        <html>
+          <body>
+            <div id="wrapper">
+              <ul class="book-list">
+                <li class="book-item">
+                  <a href="/book/101">海边的&nbsp;&amp;&nbsp;灯塔</a>
+                  <span class="author">林书</span>
+                </li>
+                <li class="book-item">
+                  <a href="/book/102">第二本书</a>
+                  <span class="author">测试</span>
+                </li>
+              </ul>
+              <div id="content">
+                第一行正文。<br/>第二行正文。
+                广告：点击购买会员
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+        let dom = HTMLMiniParser.parse(sampleHTML)
+        let listItems = HTMLMiniParser.queryNodes(root: dom, rule: "//ul[@class='book-list']/li")
+        if listItems.count != 2 {
+            errors.append("HTMLMiniParser 列表节点匹配数量不为 2: \(listItems.count)")
+        } else {
+            let firstTitle = HTMLMiniParser.queryStrings(root: listItems[0], rule: "a@text").first
+            if firstTitle != "海边的 & 灯塔" {
+                errors.append("HTMLMiniParser 文本提取或实体解码不符：\(firstTitle ?? "nil")")
+            }
+            let firstHref = HTMLMiniParser.queryStrings(root: listItems[0], rule: "a@href").first
+            if firstHref != "/book/101" {
+                errors.append("HTMLMiniParser 属性提取不符：\(firstHref ?? "nil")")
+            }
+        }
+        let cleanContent = HTMLMiniParser.queryStrings(root: dom, rule: "#content@text##广告.*##").first
+        if cleanContent?.contains("广告") == true {
+            errors.append("HTMLMiniParser 正则替换未生效：\(cleanContent ?? "nil")")
+        }
+        let commaHTML = """
+        <div class="newbox"><ul><li><a href="/book/1">甲</a></li></ul></div>
+        <div class="mybox"><li><a href="/book/2">乙</a></li></div>
+        """
+        let commaNodes = HTMLMiniParser.queryNodes(root: HTMLMiniParser.parse(commaHTML), rule: ".newbox ul li, .mybox li")
+        if commaNodes.count != 2 {
+            errors.append("逗号选择器没有分别匹配：\(commaNodes.count)")
+        }
+
+        // 4. 测试 RuleBasedBookCatalog 端到端链路与网络模拟
+        switch finishAsync({ try await probeRuleCatalog() }) {
+        case .failure(let error):
+            errors.append("规则书源请求测试失败：\(error)")
+        case .success(let passed):
+            if !passed {
+                errors.append("规则书源搜索或内容抓取不符")
+            }
+        }
+        if let shuba = BookSourceLibrary.switchable(records: []).first(where: { $0.id == "preset-69shuba" }) {
+            switch finishAsync({ try await probeShubaBook(recordID: shuba.id, source: shuba.source) }) {
+            case .failure(let error):
+                errors.append("69书吧正文抓取失败：\(error)")
+            case .success(let message):
+                if let message {
+                    errors.append(message)
+                }
+            }
+        } else {
+            errors.append("切换列表没有 69书吧")
+        }
+        CatalogURLStub.setRoutes([:])
+
+        // 5. 测试 SourceRecord 与 SwiftData 兼容字段
+        let record = SourceRecord(
+            name: "阅读源",
+            baseURL: "https://example.com",
+            format: BookSourceKind.legado.rawValue,
+            rawJSON: legadoJSON
+        )
+        if record.format != "legado" || record.rawJSON != legadoJSON {
+            errors.append("SourceRecord 新增字段保存不符")
+        }
+        let enabledCatalogs = BookCatalogs.enabled(records: [record])
+        if !enabledCatalogs.contains(where: { $0 is RuleBasedBookCatalog }) {
+            errors.append("启用书源中未生成 RuleBasedBookCatalog")
+        }
+
+        // 6. 测试预设 10 大书源规范与完整性
+        let presets = PresetBookSources.all
+        if presets.count != 10 {
+            errors.append("预设书源数量不为 10: \(presets.count)")
+        }
+        let legadoPresets = presets.filter { $0.kind == .legado }
+        let xiangsePresets = presets.filter { $0.kind == .xiangse }
+        if legadoPresets.isEmpty || xiangsePresets.isEmpty {
+            errors.append("预设书源必须同时包含阅读 3.0 与香色闺阁格式")
+        }
+        for item in presets {
+            if item.source.name.isEmpty || item.source.sourceURL.isEmpty || item.source.searchRule.urlTemplate.isEmpty {
+                errors.append("预设书源 \(item.name) 关键规则缺失")
+            }
+            if item.source.exploreRule.urlTemplate.isEmpty {
+                errors.append("预设书源 \(item.name) 缺少发现规则")
+            }
+        }
+    }
+
+    private static func checkSourceSwitch(_ errors: inout [String]) {
+        let sites = BookSourceLibrary.switchable(records: [])
+        guard let feilu = sites.first(where: { $0.id == "site-feilu" }),
+              let shuba = sites.first(where: { $0.id == "preset-69shuba" }),
+              let xiangshu = sites.first(where: { $0.id == "preset-xiangshu" }) else {
+            errors.append("切换列表缺少飞卢、69书吧或香书小说")
+            return
+        }
+        let removedIDs = [
+            "site-y52", "preset-qidian", "site-allnovel", "site-witch",
+            "site-kuangren", "site-wanwenxue", "site-gegedang", "site-wuwen"
+        ]
+        if sites.contains(where: { removedIDs.contains($0.id) }) {
+            errors.append("无法解析出书的书源仍在切换列表")
+        }
+        if !feilu.source.sourceURL.contains("faloo.com") {
+            errors.append("飞卢没有切到自己的站点 \(feilu.source.sourceURL)")
+        }
+        if sites.contains(where: { $0.id != feilu.id && $0.source.sourceURL.contains("faloo.com") }) {
+            errors.append("别的书源占用了飞卢地址")
+        }
+        let presetHosts = PresetBookSources.all.map { BookSourceLibrary.hostKey($0.source.sourceURL) }
+        if Set(presetHosts).count != presetHosts.count {
+            errors.append("预设书源主机重复 \(presetHosts)")
+        }
+        if PresetBookSources.all.contains(where: { $0.kind == .xiangse && $0.id == "preset-xiangshu" }) != true {
+            errors.append("香书小说没有作为香色闺阁格式保留")
+        }
+        let filterTemplate = "男频::https://www.qidian.com/all/chanId{{分类}}-subCateId-1-orderId{{排序}}-style{{属性}}-pageSize20-siteid1-pubflag0-hiddenField0-page{{page}}/?words={{字数}}&status={{状态}}&quality={{品质}}&update={{更新}}&&分类&&全部::-1&&玄幻::21&&字数&&全部::0&&30万字以下::1"
+        let filterChannels = ExploreURLParser.channels(from: filterTemplate)
+        if filterChannels.first?.title != "男频"
+            || filterChannels.first?.filters.first(where: { $0.key == "分类" })?.options.contains(where: { $0.label == "玄幻" && $0.value == "21" }) != true {
+            errors.append("发现筛选语法不符")
+        }
+        if let template = filterChannels.first?.urlTemplate {
+            let url = ExploreURLParser.resolve(
+                template: template,
+                selections: ["分类": "21", "排序": "0", "属性": "-1", "字数": "1", "状态": "0", "品质": "-1", "更新": "0"],
+                page: 2
+            )
+            if !url.contains("chanId21") || !url.contains("page2") || !url.contains("words=1") {
+                errors.append("发现地址没有套用筛选 \(url)")
+            }
+        }
+        let xiangshuHTML = """
+        <div id="newscontent"><div class="l"><ul>
+          <li><span class="s2"><a href="http://www.ibiqugu.net/166/166645/">旧生物</a></span><span class="s4">穿黄衣的阿肥</span></li>
+          <li><span class="s2"><a href="http://www.ibiqugu.net/146/146318/">御兽，我是最强路人</a></span><span class="s5">雾雨风雾霭</span></li>
+        </ul></div></div>
+        """
+        let xiangshuBooks = books(in: xiangshuHTML, rule: xiangshu.source.exploreRule)
+        if xiangshuBooks.first?.title != "旧生物" || xiangshuBooks.first?.author != "穿黄衣的阿肥"
+            || xiangshuBooks.contains(where: { $0.title == "御兽，我是最强路人" && $0.author == "雾雨风雾霭" }) != true {
+            errors.append("香书小说没有解析出书籍 \(xiangshuBooks)")
+        }
+
+        let disabled = SourceRecord(
+            name: "飞卢小说网",
+            baseURL: "https://wap.faloo.com",
+            format: BookSourceKind.legado.rawValue,
+            rawJSON: ""
+        )
+        disabled.enabled = false
+        let hidden = BookSourceLibrary.switchable(records: [disabled])
+        if hidden.contains(where: { $0.id == "site-feilu" || BookSourceLibrary.hostKey($0.source.sourceURL) == "wap.faloo.com" }) {
+            errors.append("关闭飞卢后它仍出现在切换列表")
+        }
+
+        if let preset = PresetBookSources.all.first {
+            do {
+                let data = try JSONEncoder().encode(preset.source)
+                guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    errors.append("旧书源 JSON 不是对象")
+                    return
+                }
+                object.removeValue(forKey: "exploreRule")
+                let stripped = try JSONSerialization.data(withJSONObject: object)
+                let decoded = try JSONDecoder().decode(UniversalBookSource.self, from: stripped)
+                if decoded.name != preset.source.name || !decoded.exploreRule.urlTemplate.isEmpty {
+                    errors.append("旧书源 JSON 缺少发现规则时还原失败")
+                }
+            } catch {
+                errors.append("旧书源 JSON 解码失败 \(error)")
+            }
+        }
+
+        let exploreJSON = """
+        {
+          "bookSourceName": "发现测试",
+          "bookSourceUrl": "https://explore.test",
+          "exploreUrl": "玄幻::/xuanhuan/{{page}}.html\\n都市::/dushi/{{page}}.html",
+          "ruleExplore": {"bookList": ".book", "name": "a@text", "bookUrl": "a@href"}
+        }
+        """
+        do {
+            let parsed = try BookSourceParser.parse(text: exploreJSON)
+            if parsed.first?.exploreRule.listSelector != ".book" {
+                errors.append("阅读发现选择器没有解析")
+            }
+            let found = ExploreURLParser.channels(from: parsed.first?.exploreRule.urlTemplate ?? "")
+            if found.map(\.title) != ["玄幻", "都市"] {
+                errors.append("阅读发现频道不符 \(found.map(\.title))")
+            }
+        } catch {
+            errors.append("阅读发现 JSON 解析失败 \(error)")
+        }
+
+        let findJSON = """
+        {
+          "sourceName": "香色发现",
+          "sourceUrl": "https://xiangse.test",
+          "findBook": {
+            "requestInfo": "言情::/yanqing/{{page}}.html",
+            "list": "//li",
+            "bookName": "//a/text()",
+            "detailUrl": "//a/@href"
+          }
+        }
+        """
+        do {
+            let parsed = try BookSourceParser.parse(text: findJSON)
+            let rule = parsed.first?.exploreRule
+            if rule?.listSelector != "//li" || rule?.urlTemplate.contains("https://xiangse.test/yanqing/") != true {
+                errors.append("香色发现规则不符 \(rule?.urlTemplate ?? "nil")")
+            }
+        } catch {
+            errors.append("香色发现 JSON 解析失败 \(error)")
+        }
+
+        if let penguin = sites.first(where: { $0.id == "site-penguin" }) {
+            if !penguin.source.sourceURL.contains("qiexs.cc") {
+                errors.append("企鹅小说仍指向 \(penguin.source.sourceURL)")
+            }
+            let home = """
+            <ul class="list-group list-top">
+              <li class="list-group-item">
+                <a href="https://www.qiexs.cc/xiaoshuo/7399.html" title="江边柔风起">江边柔风起</a>
+                <small class="text-muted">/ 暮二十九</small>
+              </li>
+            </ul>
+            """
+            let homeBooks = books(in: home, rule: penguin.source.exploreRule)
+            if homeBooks.first?.title != "江边柔风起" || homeBooks.first?.author != "暮二十九" {
+                errors.append("企鹅小说首页没有解析出排行 \(homeBooks)")
+            }
+            let category = """
+            <table class="mytable table">
+              <tr><th>书名</th><th>作者</th></tr>
+              <tr>
+                <td><a href="https://www.qiexs.cc/xiaoshuo/21094.html" title="边关第一猎户">边关第一猎户</a></td>
+                <td class="hidden-xs"><a class="text-muted" href="https://www.qiexs.cc/xiaoshuo/21094/1.html">第1章</a></td>
+                <td class="text-muted">柳白飞</td>
+                <td class="text-nowrap">连载</td>
+              </tr>
+            </table>
+            """
+            let categoryBooks = books(in: category, rule: penguin.source.exploreRule)
+            if categoryBooks.first?.title != "边关第一猎户" || categoryBooks.first?.author != "柳白飞" {
+                errors.append("企鹅小说分类页没有解析出表格 \(categoryBooks)")
+            }
+            let searchCard = """
+            <div class="col-md-10">
+              <h4 class="bookTitle"><a href="https://www.qiexs.cc/xiaoshuo/948.html"><em>斗破</em>之无上之境</a></h4>
+              <p class="booktag"><a class="red" href="https://www.qiexs.cc/author/1741.html">夜雨闻铃0</a></p>
+            </div>
+            """
+            let searched = books(in: searchCard, rule: penguin.source.searchRule)
+            if searched.first?.author != "夜雨闻铃0" || searched.first?.title.contains("斗破") != true {
+                errors.append("企鹅小说搜索结果没有解析 \(searched)")
+            }
+        } else {
+            errors.append("切换列表缺少企鹅小说")
+        }
+
+        let shubaChannels = ExploreURLParser.channels(from: shuba.source.exploreRule.urlTemplate)
+        if shubaChannels.first?.title != "全部分类" || shubaChannels.contains(where: { $0.urlTemplate.contains("/novels/class/1.htm") }) != true {
+            errors.append("69书吧发现频道不符 \(shubaChannels.map(\.title))")
+        }
+        let shubaHTML = """
+        <div id="article_list_content">
+          <ul>
+            <li>
+              <h3><a href="/class/1.htm">玄幻</a><a href="/book/1.htm">灯塔传说</a></h3>
+              <label>守塔人</label>
+              <p class="ellipsis_2">海岸上的灯</p>
+            </li>
+          </ul>
+        </div>
+        """
+        let shubaBooks = books(in: shubaHTML, rule: shuba.source.exploreRule)
+        if shubaBooks.first?.title != "灯塔传说" || shubaBooks.first?.author != "守塔人" {
+            errors.append("69书吧分类页没有解析出书籍 \(shubaBooks)")
+        }
+
+        let feiluChannels = ExploreURLParser.channels(from: feilu.source.exploreRule.urlTemplate)
+        if !feilu.source.sourceURL.contains("wap.faloo.com")
+            || feiluChannels.contains(where: { $0.urlTemplate.contains("y_4_14_0_0_0_0.html") }) != true {
+            errors.append("飞卢发现地址不符 \(feilu.source.sourceURL)")
+        }
+        let falooHome = """
+        <li><a href="//wap.faloo.com/1547460.html" title="四合院：李云龙是我大哥"><div class="novelName">四合院：李云龙是我大哥</div></a></li>
+        """
+        let falooBooks = books(in: falooHome, rule: feilu.source.exploreRule)
+        if falooBooks.first?.title != "四合院：李云龙是我大哥" || falooBooks.first?.author != "" {
+            errors.append("飞卢首页没有解析出书卡 \(falooBooks)")
+        }
+        let falooCategory = """
+        <div class="nl_r1">
+          <div class="bl_r1_tit"><a href="//wap.faloo.com/1406705.html">四合院：从民国开始起飞</a></div>
+          <div class="nl_r1_author"><a href="//wap.faloo.com/author">计算机</a><a href="//wap.faloo.com/y_4_14_0_0_0_0.html">都市生活</a></div>
+        </div>
+        """
+        let falooCategoryBooks = books(in: falooCategory, rule: feilu.source.exploreRule)
+        if falooCategoryBooks.first?.title != "四合院：从民国开始起飞" || falooCategoryBooks.first?.author != "计算机" {
+            errors.append("飞卢分类页没有解析出书籍 \(falooCategoryBooks)")
+        }
+
+        guard let wucuo = sites.first(where: { $0.id == "preset-wucuo" }),
+              let jiujiu = sites.first(where: { $0.id == "site-jiujiu" }),
+              let zongheng = sites.first(where: { $0.id == "site-zongheng" }),
+              let shuqi = sites.first(where: { $0.id == "site-shuqi" }) else {
+            errors.append("切换列表缺少无错、久久、纵横或书旗")
+            return
+        }
+        if !wucuo.source.sourceURL.contains("m.wucuoxs.com")
+            || !wucuo.source.exploreRule.urlTemplate.contains("/sort-1-1/") {
+            errors.append("无错小说仍指向 \(wucuo.source.sourceURL)")
+        }
+        let wucuoHTML = """
+        <article>
+          <a href="/wcxs-26874/"><div class="info"><h2 class="title">江左伪郎</h2><p>作者：历史系之狼</p><p class="intro">简介：衣冠南渡</p></div></a>
+        </article>
+        """
+        let wucuoBooks = books(in: wucuoHTML, rule: wucuo.source.exploreRule)
+        if wucuoBooks.first?.title != "江左伪郎" || wucuoBooks.first?.author != "历史系之狼" {
+            errors.append("无错小说没有解析出书籍 \(wucuoBooks)")
+        }
+        if !jiujiu.source.sourceURL.contains("ijjxsxzw.com")
+            || !jiujiu.source.exploreRule.urlTemplate.contains("/txt/chuanyue/") {
+            errors.append("久久小说仍指向 \(jiujiu.source.sourceURL)")
+        }
+        let jiujiuHome = """
+        <span class="line-main"><span class="cat">穿越</span><a href="/txt/57617.html">清澈女大的六零年代</a><span class="author">九紫</span></span>
+        """
+        let jiujiuBooks = books(in: jiujiuHome, rule: jiujiu.source.exploreRule)
+        if jiujiuBooks.first?.title != "清澈女大的六零年代" || jiujiuBooks.first?.author != "九紫" {
+            errors.append("久久首页没有解析出书籍 \(jiujiuBooks)")
+        }
+        let jiujiuCategory = """
+        <div class="listbg">
+          <a class="img" href="/txt/57617.html"></a>
+          <span class="title"><a href="/txt/57617.html">清澈女大的六零年代</a></span>
+          <span class="mainGreen"><a href="/zuozhe/1101.html">九紫</a></span>
+        </div>
+        """
+        let jiujiuCategoryBooks = books(in: jiujiuCategory, rule: jiujiu.source.exploreRule)
+        if jiujiuCategoryBooks.first?.title != "清澈女大的六零年代" || jiujiuCategoryBooks.first?.author != "九紫" {
+            errors.append("久久分类页没有解析出书籍 \(jiujiuCategoryBooks)")
+        }
+        let jiujiuSearch = """
+        <div class="searchTopic">1 、<a href="/txt/57617.html" class="searchtitle"><mark>清澈</mark>女大的六零年代</a> 作者：九紫</div>
+        """
+        let jiujiuSearched = books(in: jiujiuSearch, rule: jiujiu.source.searchRule)
+        if jiujiuSearched.first?.title.contains("女大的六零年代") != true || jiujiuSearched.first?.author != "九紫" {
+            errors.append("久久搜索没有解析出书籍 \(jiujiuSearched)")
+        }
+        if !zongheng.source.exploreRule.urlTemplate.contains("cateFineId=8101") {
+            errors.append("纵横发现地址不符 \(zongheng.source.exploreRule.urlTemplate)")
+        }
+        let zonghengHTML = """
+        <div class="recommend-item">
+          <a class="recommend-img--cover" href="//www.zongheng.com/detail/1327987" title="史上最强师父"></a>
+          <div class="recommend-type"><a href="//home.zongheng.com/u">炒方便面</a><a href="//www.zongheng.com/categories?cateFineId=8101">玄幻奇幻</a></div>
+        </div>
+        <div class="zh-modules-rank-book">
+          <p class="book-rank--title-text"><a href="//www.zongheng.com/detail/1610880">明君</a></p>
+        </div>
+        """
+        let zonghengBooks = books(in: zonghengHTML, rule: zongheng.source.exploreRule)
+        if zonghengBooks.first?.title != "史上最强师父" || zonghengBooks.first?.author != "炒方便面"
+            || zonghengBooks.contains(where: { $0.title == "明君" }) != true {
+            errors.append("纵横首页没有解析出书籍 \(zonghengBooks)")
+        }
+        if !shuqi.source.sourceURL.contains("t.shuqi.com") {
+            errors.append("书旗仍指向 \(shuqi.source.sourceURL)")
+        }
+        let shuqiHTML = """
+        <a class="item" href="/book/8229478.html"><p class="book-name">玄幻：从蛋开始无敌</p><p class="author-name">突兀</p></a>
+        <a class="book-item-a" href="/book/6813921.html"><h3>鸿蒙道尊</h3><label>九支书竹</label></a>
+        """
+        let shuqiBooks = books(in: shuqiHTML, rule: shuqi.source.exploreRule)
+        if shuqiBooks.first?.title != "玄幻：从蛋开始无敌" || shuqiBooks.first?.author != "突兀"
+            || shuqiBooks.contains(where: { $0.title == "鸿蒙道尊" && $0.author == "九支书竹" }) != true {
+            errors.append("书旗首页没有解析出书籍 \(shuqiBooks)")
+        }
+
+        if let bijian = sites.first(where: { $0.id == "preset-bijian" }) {
+            let html = """
+            <div class="l"><ul>
+              <li><span class="s2"><a href="http://www.xbiquwk.com/0_580/">绝世唐门</a></span><span class="s4">唐家三少</span><span class="s5">10-09</span></li>
+            </ul></div>
+            """
+            let parsed = books(in: html, rule: bijian.source.exploreRule)
+            if parsed.first?.title != "绝世唐门" || parsed.first?.author != "唐家三少" {
+                errors.append("笔尖中文没有解析出书籍 \(parsed)")
+            }
+        } else {
+            errors.append("切换列表缺少笔尖中文")
+        }
+        if let b365 = sites.first(where: { $0.id == "preset-biqu365" }) {
+            let html = """
+            <ul class="gengxin"><li><span class="name"><a href="/book/21601/">军工科技</a></span></li></ul>
+            """
+            let parsed = books(in: html, rule: b365.source.exploreRule)
+            if parsed.first?.title != "军工科技" {
+                errors.append("笔趣阁365没有解析出书籍 \(parsed)")
+            }
+            let searched = books(in: """
+            <ul class="search"><li class="fen"><span class="name">书名</span></li><li><span class="name"><a href="/book/007042/">军工：开局打造神级战机</a></span></li></ul>
+            """, rule: b365.source.searchRule)
+            if searched.first?.title != "军工：开局打造神级战机" {
+                errors.append("笔趣阁365搜索没有解析出书籍 \(searched)")
+            }
+        } else {
+            errors.append("切换列表缺少笔趣阁365")
+        }
+        if let quanben = sites.first(where: { $0.id == "preset-quanben5" }) {
+            let html = """
+            <div class="pic_txt_list"><h3><a href="/n/xinghedadi/"><span>星河大帝</span></a></h3><p class="info">作者: <span class="author">梦入神机</span></p></div>
+            <ul class="list2"><li><a href="/n/jueshiwushen/">绝世武神</a></li></ul>
+            """
+            let parsed = books(in: html, rule: quanben.source.exploreRule)
+            if parsed.contains(where: { $0.title == "星河大帝" && $0.author == "梦入神机" }) != true
+                || parsed.contains(where: { $0.title == "绝世武神" }) != true {
+                errors.append("全本小说网没有解析出书籍 \(parsed)")
+            }
+        } else {
+            errors.append("切换列表缺少全本小说网")
+        }
+        if let yeudu = sites.first(where: { $0.id == "preset-yeudu" }) {
+            let html = """
+            <li class="recommend-item"><a class="ends" href="http://www.yeudusk.com/html/510/510881/">夜玄</a></li>
+            <div class="c_subject"><a class="note" href="http://www.yeudusk.com/html/1440/1440726/">目录</a><a href="http://www.yeudusk.com/book/1440726/">妖女，快住口！</a></div>
+            """
+            let parsed = books(in: html, rule: yeudu.source.exploreRule)
+            if parsed.first?.title != "夜玄"
+                || parsed.contains(where: { $0.title == "妖女，快住口！" && $0.author == "" }) != true {
+                errors.append("阅读库没有解析出书籍 \(parsed)")
+            }
+            if parsed.contains(where: { $0.title == "目录" }) {
+                errors.append("阅读库把目录图标当成了书")
+            }
+        } else {
+            errors.append("切换列表缺少阅读库")
+        }
+        if let ujxsw = sites.first(where: { $0.id == "preset-ujxsw" }) {
+            let html = """
+            <dl><dt><a href="http://www.ujxsw.org/book/1022/"><img alt="大奉打更人"></a></dt><dd><a href="http://www.ujxsw.org/book/1022/">大奉打更人</a></dd><dd class="tit">作者：卖报小郎君</dd></dl>
+            """
+            let parsed = books(in: html, rule: ujxsw.source.exploreRule)
+            if parsed.first?.title != "大奉打更人" || parsed.first?.author != "卖报小郎君" {
+                errors.append("悠久小说网没有解析出书籍 \(parsed)")
+            }
+        } else {
+            errors.append("切换列表缺少悠久小说网")
+        }
+    }
+
+    private static func books(in html: String, rule: SourceExploreRule) -> [(title: String, author: String)] {
+        books(
+            in: html,
+            list: rule.listSelector,
+            name: rule.nameSelector,
+            author: rule.authorSelector,
+            detail: rule.detailURLSelector
+        )
+    }
+
+    private static func books(in html: String, rule: SourceSearchRule) -> [(title: String, author: String)] {
+        books(
+            in: html,
+            list: rule.listSelector,
+            name: rule.nameSelector,
+            author: rule.authorSelector,
+            detail: rule.detailURLSelector
+        )
+    }
+
+    private static func books(
+        in html: String,
+        list: String,
+        name: String,
+        author: String,
+        detail: String
+    ) -> [(title: String, author: String)] {
+        let root = HTMLMiniParser.parse(html)
+        return HTMLMiniParser.queryNodes(root: root, rule: list).compactMap { node in
+            let title = HTMLMiniParser.queryStrings(root: node, rule: name).first ?? ""
+            let author = HTMLMiniParser.queryStrings(root: node, rule: author).first ?? ""
+            let href = node.nearestHref(preferred: HTMLMiniParser.queryStrings(root: node, rule: detail).first) ?? ""
+            guard !title.isEmpty, !href.isEmpty else { return nil }
+            return (title, author)
+        }
+    }
+
+    private nonisolated static func probeRuleCatalog() async throws -> Bool {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CatalogURLStub.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let searchHTML = """
+        <div class="search-list">
+          <div class="item">
+            <div class="title"><a href="/novel/99">灯塔传说</a></div>
+            <span class="author">守塔人</span>
+            <p class="desc">关于灯塔的故事</p>
+          </div>
+        </div>
+        """
+        let detailHTML = """
+        <h1>灯塔传说</h1>
+        <span class="author">守塔人</span>
+        <div class="chapters">
+          <a href="/novel/99/c1">第一章 晨曦</a>
+          <a href="/novel/99/c2">第二章 黄昏</a>
+        </div>
+        """
+        let c1HTML = """
+        <div id="content">清晨的雾气笼罩着海岸。##广告:请勿相信##</div>
+        """
+        let c2HTML = """
+        <div id="content">落日把海面染成了金色。</div>
+        """
+
+        CatalogURLStub.setRoutes([
+            "/search": (200, Data(searchHTML.utf8)),
+            "/explore/21/1.html": (200, Data(searchHTML.utf8)),
+            "/novel/99": (200, Data(detailHTML.utf8)),
+            "/novel/99/c1": (200, Data(c1HTML.utf8)),
+            "/novel/99/c2": (200, Data(c2HTML.utf8))
+        ])
+
+        let source = UniversalBookSource(
+            kind: .legado,
+            name: "测试规则源",
+            sourceURL: "https://catalog.test",
+            searchRule: SourceSearchRule(
+                urlTemplate: "https://catalog.test/search?keyword={{key}}",
+                listSelector: ".search-list .item",
+                nameSelector: ".title a@text",
+                authorSelector: ".author@text",
+                detailURLSelector: ".title a@href",
+                summarySelector: ".desc@text"
+            ),
+            tocRule: SourceTocRule(
+                listSelector: ".chapters a",
+                nameSelector: "text",
+                urlSelector: "href"
+            ),
+            contentRule: SourceContentRule(
+                contentSelector: "#content@text",
+                replaceRules: ["##广告.*?##"]
+            ),
+            exploreRule: SourceExploreRule(
+                urlTemplate: "男频::https://catalog.test/explore/{{分类}}/{{page}}.html&&分类&&全部::-1&&玄幻::21",
+                listSelector: ".search-list .item",
+                nameSelector: ".title a@text",
+                authorSelector: ".author@text",
+                detailURLSelector: ".title a@href",
+                summarySelector: ".desc@text"
+            )
+        )
+
+        let catalog = RuleBasedBookCatalog(recordID: "test-rule-id", source: source, session: session)
+        let found = try await catalog.search(query: "灯塔")
+        guard found.count == 1, found[0].title == "灯塔传说", found[0].author == "守塔人" else {
+            return false
+        }
+
+        let downloaded = try await catalog.fetchText(bookID: found[0].id, progress: nil)
+        guard downloaded.title == "灯塔传说" else {
+            return false
+        }
+        guard downloaded.text.contains("第一章 晨曦"), downloaded.text.contains("第二章 黄昏") else {
+            return false
+        }
+        guard !downloaded.text.contains("广告") else {
+            return false
+        }
+
+        let channels = ExploreURLParser.channels(from: source.exploreRule.urlTemplate)
+        guard let channel = channels.first else { return false }
+        let explored = try await catalog.explore(channelURL: channel.urlTemplate, selections: ["分类": "21"], page: 1)
+        guard explored.count == 1, explored[0].title == "灯塔传说", explored[0].author == "守塔人" else {
+            return false
+        }
+
+        return true
+    }
+
+    /// 详情页没有目录。目录在把 .htm 换成 / 的地址上，而且最新章节排在前面。
+    private nonisolated static func probeShubaBook(recordID: String, source: UniversalBookSource) async throws -> String? {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CatalogURLStub.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let detail = """
+        <h1>灯塔传说</h1>
+        <div class="booknav2"><a href="/author/1">守塔人</a></div>
+        """
+        let catalog = """
+        <div id="catalog"><ul>
+          <li data-num="2"><a href="/txt/88/2">第2章 黄昏</a></li>
+          <li data-num="1"><a href="/txt/88/1">第1章 晨曦</a></li>
+          <li data-num="0"><a href="/book/88.htm">灯塔传说目录</a></li>
+        </ul></div>
+        """
+        let first = """
+        <div class="txtnav">
+          <h1>第1章 晨曦</h1>
+          <div class="txtinfo">作者：守塔人</div>
+          <div id="txtright">广告位</div>
+          清晨的雾气笼罩着海岸。
+          <br>69书吧 www.69shuba.com
+        </div>
+        """
+        let second = """
+        <div class="txtnav">
+          <h1>第2章 黄昏</h1>
+          <div class="txtinfo">作者：守塔人</div>
+          落日把海面染成了金色。
+        </div>
+        """
+        CatalogURLStub.setRoutes([
+            "/book/88.htm": (200, Data(detail.utf8)),
+            "/book/88": (200, Data(catalog.utf8)),
+            "/txt/88/1": (200, Data(first.utf8)),
+            "/txt/88/2": (200, Data(second.utf8))
+        ])
+        let downloader = RuleBasedBookCatalog(recordID: recordID, source: source, session: session)
+        let fetched = try await downloader.fetchText(bookID: "https://www.69shuba.com/book/88.htm", progress: nil)
+        if fetched.title != "灯塔传说" {
+            return "69书吧书名不符 \(fetched.title)"
+        }
+        guard let dawn = fetched.text.range(of: "第1章 晨曦"),
+              let dusk = fetched.text.range(of: "第2章 黄昏"),
+              dawn.lowerBound < dusk.lowerBound else {
+            return "69书吧章节顺序不符"
+        }
+        if !fetched.text.contains("清晨的雾气笼罩着海岸。") || !fetched.text.contains("落日把海面染成了金色。") {
+            return "69书吧没有抓到正文"
+        }
+        if fetched.text.contains("广告位") || fetched.text.contains("69书吧") || fetched.text.contains("灯塔传说目录") {
+            return "69书吧正文混进了广告或目录链接"
+        }
+        let opening = try await downloader.fetchOpening(bookID: "https://www.69shuba.com/book/88.htm")
+        if opening.chapters.count != 2 {
+            return "69书吧目录章数不符 \(opening.chapters.count)"
+        }
+        if !opening.text.contains("清晨的雾气笼罩着海岸。") || opening.text.contains("落日把海面染成了金色。") {
+            return "点开 69书吧应当只带第一章"
+        }
+        let next = try await downloader.fetchChapterText(url: opening.chapters[1].url)
+        if !next.contains("落日把海面染成了金色。") || next.contains("清晨的雾气笼罩着海岸。") {
+            return "69书吧下一章正文不符"
+        }
+        return nil
     }
 
     private nonisolated struct SourceProbe: Sendable {
@@ -380,6 +1261,9 @@ enum LogicChecks {
         var remoteID = ""
         var remoteFetchedTitle = ""
         var remoteText = ""
+        var openingText = ""
+        var openingCount = 0
+        var openingNext = ""
         var marks: [String] = []
         var missingIsNotFound = false
         var badJSON = false
@@ -417,6 +1301,12 @@ enum LogicChecks {
         let remoteFound = try await remote.search(query: "海岸")
         probe.remoteTitle = remoteFound.first?.title ?? ""
         probe.remoteID = remoteFound.first?.id ?? ""
+        let opening = try await remote.fetchOpening(bookID: "demo")
+        probe.openingText = opening.text
+        probe.openingCount = opening.chapters.count
+        if opening.chapters.count > 1 {
+            probe.openingNext = try await remote.fetchChapterText(url: opening.chapters[1].url)
+        }
         let marks = MarkList()
         let remoteText = try await remote.fetchText(bookID: "demo") { done, total in
             marks.values.append("\(done)/\(total)")

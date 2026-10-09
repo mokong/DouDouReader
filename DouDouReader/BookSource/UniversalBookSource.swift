@@ -1,0 +1,230 @@
+import Foundation
+
+/// 书源格式类型
+enum BookSourceKind: String, Codable, Sendable, CaseIterable {
+    case legado = "legado"    // 阅读 3.0 (开源安卓阅读 Legado)
+    case xiangse = "xiangse"  // 香色闺阁 (iOS StandarReader)
+    case doudou = "doudou"    // 豆豆原生标准接口
+
+    var displayName: String {
+        switch self {
+        case .legado: "阅读 3.0"
+        case .xiangse: "香色闺阁"
+        case .doudou: "豆豆标准"
+        }
+    }
+
+    var badgeColorName: String {
+        switch self {
+        case .legado: "green"
+        case .xiangse: "purple"
+        case .doudou: "blue"
+        }
+    }
+}
+
+/// 发现规则。频道和筛选项写在 urlTemplate 里，选择器为空时执行阶段回退到搜索规则。
+nonisolated struct SourceExploreRule: Codable, Sendable, Equatable {
+    var urlTemplate: String = ""
+    var listSelector: String = ""
+    var nameSelector: String = ""
+    var authorSelector: String = ""
+    var detailURLSelector: String = ""
+    var summarySelector: String = ""
+    var coverSelector: String = ""
+
+    nonisolated init(
+        urlTemplate: String = "",
+        listSelector: String = "",
+        nameSelector: String = "",
+        authorSelector: String = "",
+        detailURLSelector: String = "",
+        summarySelector: String = "",
+        coverSelector: String = ""
+    ) {
+        self.urlTemplate = urlTemplate
+        self.listSelector = listSelector
+        self.nameSelector = nameSelector
+        self.authorSelector = authorSelector
+        self.detailURLSelector = detailURLSelector
+        self.summarySelector = summarySelector
+        self.coverSelector = coverSelector
+    }
+}
+
+/// 统一的书源模型，抽象“阅读 3.0”、“香色闺阁”和“豆豆标准源”
+nonisolated struct UniversalBookSource: Identifiable, Codable, Sendable, Equatable {
+    var id: String
+    var kind: BookSourceKind
+    var name: String
+    var sourceURL: String
+    var group: String
+    var enabled: Bool
+    var weight: Int
+
+    // 搜索规则
+    var searchRule: SourceSearchRule
+    // 目录与书籍详情规则
+    var tocRule: SourceTocRule
+    // 正文提取规则
+    var contentRule: SourceContentRule
+    // 发现规则（香色闺阁切换站点后的频道、筛选与书单）
+    var exploreRule: SourceExploreRule
+
+    // 原始 JSON 配置（用于持久化与调试）
+    var rawJSON: String
+
+    nonisolated init(
+        id: String = UUID().uuidString,
+        kind: BookSourceKind,
+        name: String,
+        sourceURL: String,
+        group: String = "",
+        enabled: Bool = true,
+        weight: Int = 100,
+        searchRule: SourceSearchRule = SourceSearchRule(),
+        tocRule: SourceTocRule = SourceTocRule(),
+        contentRule: SourceContentRule = SourceContentRule(),
+        exploreRule: SourceExploreRule = SourceExploreRule(),
+        rawJSON: String = ""
+    ) {
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.sourceURL = sourceURL
+        self.group = group
+        self.enabled = enabled
+        self.weight = weight
+        self.searchRule = searchRule
+        self.tocRule = tocRule
+        self.contentRule = contentRule
+        self.exploreRule = exploreRule
+        self.rawJSON = rawJSON
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, name, sourceURL, group, enabled, weight
+        case searchRule, tocRule, contentRule, exploreRule, rawJSON
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        kind = try container.decode(BookSourceKind.self, forKey: .kind)
+        name = try container.decode(String.self, forKey: .name)
+        sourceURL = try container.decode(String.self, forKey: .sourceURL)
+        group = try container.decodeIfPresent(String.self, forKey: .group) ?? ""
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        weight = try container.decodeIfPresent(Int.self, forKey: .weight) ?? 100
+        searchRule = try container.decodeIfPresent(SourceSearchRule.self, forKey: .searchRule) ?? SourceSearchRule()
+        tocRule = try container.decodeIfPresent(SourceTocRule.self, forKey: .tocRule) ?? SourceTocRule()
+        contentRule = try container.decodeIfPresent(SourceContentRule.self, forKey: .contentRule) ?? SourceContentRule()
+        exploreRule = try container.decodeIfPresent(SourceExploreRule.self, forKey: .exploreRule) ?? SourceExploreRule()
+        rawJSON = try container.decodeIfPresent(String.self, forKey: .rawJSON) ?? ""
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(name, forKey: .name)
+        try container.encode(sourceURL, forKey: .sourceURL)
+        try container.encode(group, forKey: .group)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(weight, forKey: .weight)
+        try container.encode(searchRule, forKey: .searchRule)
+        try container.encode(tocRule, forKey: .tocRule)
+        try container.encode(contentRule, forKey: .contentRule)
+        try container.encode(exploreRule, forKey: .exploreRule)
+        try container.encode(rawJSON, forKey: .rawJSON)
+    }
+}
+
+/// 搜索规则
+nonisolated struct SourceSearchRule: Codable, Sendable, Equatable {
+    /// 搜索请求地址模板，例如 "https://example.com/search?q={{key}}" 或 "...?word=%@keyWord"
+    var urlTemplate: String = ""
+    /// 请求方式：GET 或 POST
+    var httpMethod: String = "GET"
+    /// POST Body 模板（若为 POST）
+    var postBody: String? = nil
+    /// 请求头信息
+    var headers: [String: String] = [:]
+
+    /// 搜索结果列表选择器（CSS/XPath/JSONPath）
+    var listSelector: String = ""
+    /// 书名选择器
+    var nameSelector: String = ""
+    /// 作者选择器
+    var authorSelector: String = ""
+    /// 详情页/书籍 URL 选择器
+    var detailURLSelector: String = ""
+    /// 简介选择器
+    var summarySelector: String = ""
+    /// 封面图选择器
+    var coverSelector: String = ""
+
+    nonisolated init(
+        urlTemplate: String = "",
+        httpMethod: String = "GET",
+        postBody: String? = nil,
+        headers: [String: String] = [:],
+        listSelector: String = "",
+        nameSelector: String = "",
+        authorSelector: String = "",
+        detailURLSelector: String = "",
+        summarySelector: String = "",
+        coverSelector: String = ""
+    ) {
+        self.urlTemplate = urlTemplate
+        self.httpMethod = httpMethod
+        self.postBody = postBody
+        self.headers = headers
+        self.listSelector = listSelector
+        self.nameSelector = nameSelector
+        self.authorSelector = authorSelector
+        self.detailURLSelector = detailURLSelector
+        self.summarySelector = summarySelector
+        self.coverSelector = coverSelector
+    }
+}
+
+/// 目录与详情规则
+nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
+    /// 详情页到目录页的跳转链接（如果目录页单独存在）
+    var tocURLSelector: String = ""
+    /// 章节列表选择器
+    var listSelector: String = ""
+    /// 章节名称选择器
+    var nameSelector: String = ""
+    /// 章节正文地址选择器
+    var urlSelector: String = ""
+
+    nonisolated init(
+        tocURLSelector: String = "",
+        listSelector: String = "",
+        nameSelector: String = "",
+        urlSelector: String = ""
+    ) {
+        self.tocURLSelector = tocURLSelector
+        self.listSelector = listSelector
+        self.nameSelector = nameSelector
+        self.urlSelector = urlSelector
+    }
+}
+
+/// 正文提取规则
+nonisolated struct SourceContentRule: Codable, Sendable, Equatable {
+    /// 正文内容选择器
+    var contentSelector: String = ""
+    /// 正文清洗规则（正则表达式替换，如 "##广告##"）
+    var replaceRules: [String] = []
+
+    nonisolated init(
+        contentSelector: String = "",
+        replaceRules: [String] = []
+    ) {
+        self.contentSelector = contentSelector
+        self.replaceRules = replaceRules
+    }
+}
