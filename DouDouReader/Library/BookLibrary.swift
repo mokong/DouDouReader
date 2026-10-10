@@ -106,32 +106,6 @@ enum BookStorage {
     }
 }
 
-enum ShelfGroups {
-    static let builtins = ["默认", "养肥区", "已完本"]
-    private static let customKey = "doudou.shelf.customGroups"
-
-    static func all(bookGroups: [String] = []) -> [String] {
-        let custom = UserDefaults.standard.stringArray(forKey: customKey) ?? []
-        var result: [String] = []
-        var seen = Set<String>()
-        for name in builtins + custom + bookGroups {
-            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
-            result.append(trimmed)
-        }
-        return result
-    }
-
-    static func add(_ name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !builtins.contains(trimmed) else { return }
-        var custom = UserDefaults.standard.stringArray(forKey: customKey) ?? []
-        guard !custom.contains(trimmed) else { return }
-        custom.append(trimmed)
-        UserDefaults.standard.set(custom, forKey: customKey)
-    }
-}
-
 /// 书架上认作同一本书：书名相同，作者都有时也要相同。缺作者时只看书名。
 nonisolated enum BookIdentity {
     static func normalize(_ raw: String) -> String {

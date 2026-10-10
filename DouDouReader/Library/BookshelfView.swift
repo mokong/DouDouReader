@@ -62,7 +62,7 @@ struct HomeShell: View {
             tabButton("发现", systemImage: "safari", value: .discover)
         }
         .padding(.top, 6)
-        .padding(.bottom, 2)
+        .padding(.bottom, 4)
         .background(tab == .discover ? Color.black : ShelfInk.paper)
     }
 
@@ -72,14 +72,14 @@ struct HomeShell: View {
         return Button {
             tab = value
         } label: {
-            VStack(spacing: 2) {
+            VStack(spacing: 3) {
                 Image(systemName: systemImage)
-                    .font(.body)
+                    .font(.system(size: 22, weight: selected ? .semibold : .regular))
                 Text(title)
-                    .font(.caption2)
+                    .font(.caption)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
+            .padding(.vertical, 6)
             .foregroundStyle(selected ? ShelfInk.accent : idle)
         }
         .buttonStyle(.plain)
@@ -115,13 +115,9 @@ struct BookshelfView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var books: [BookRecord]
     @AppStorage("shelf.sort") private var sortRaw = ShelfSort.recent.rawValue
-    @AppStorage("shelf.group") private var groupFilter = "全部"
     @AppStorage("shelf.layout") private var layoutRaw = "grid"
     @State private var importingText = false
     @State private var importingFont = false
-    @State private var addingGroup = false
-    @State private var newGroupName = ""
-    @State private var groupTick = 0
     @State private var notice: String?
     @State private var pendingDelete: BookRecord?
     @State private var didOpenSample = false
@@ -129,16 +125,8 @@ struct BookshelfView: View {
     private var sort: ShelfSort { ShelfSort(rawValue: sortRaw) ?? .recent }
     private var showsGrid: Bool { layoutRaw != "list" }
 
-    private var groups: [String] {
-        _ = groupTick
-        return ShelfGroups.all(bookGroups: books.map(\.groupName))
-    }
-
     private var visibleBooks: [BookRecord] {
-        books.filter { book in
-            groupFilter == "全部" || book.groupName == groupFilter
-        }
-        .sorted(by: sortBooks)
+        books.sorted(by: sortBooks)
     }
 
     private var resumeBook: BookRecord? {
@@ -151,10 +139,9 @@ struct BookshelfView: View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
                 shelfBar
-                groupBar
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        if let resumeBook, groupFilter == "全部" {
+                        if let resumeBook {
                             continueCard(resumeBook)
                         }
                         if visibleBooks.isEmpty {
@@ -202,15 +189,6 @@ struct BookshelfView: View {
             allowsMultipleSelection: false
         ) { result in
             importFont(result)
-        }
-        .alert("新建分组", isPresented: $addingGroup) {
-            TextField("名称", text: $newGroupName)
-            Button("添加") {
-                ShelfGroups.add(newGroupName)
-                newGroupName = ""
-                groupTick += 1
-            }
-            Button("取消", role: .cancel) { newGroupName = "" }
         }
         .alert("提示", isPresented: noticePresented) {
             Button("好", role: .cancel) {}
@@ -274,19 +252,6 @@ struct BookshelfView: View {
         return types
     }
 
-    private var groupBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                groupChip("全部", selected: groupFilter == "全部") { groupFilter = "全部" }
-                ForEach(groups, id: \.self) { name in
-                    groupChip(name, selected: groupFilter == name) { groupFilter = name }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-        }
-    }
-
     private var grid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 108, maximum: 150), spacing: 16)], spacing: 18) {
             ForEach(visibleBooks, id: \.id) { book in
@@ -319,7 +284,7 @@ struct BookshelfView: View {
                             Text(book.author.isEmpty ? "未知作者" : book.author)
                                 .font(.subheadline)
                                 .foregroundStyle(ShelfInk.secondary)
-                            Text("\(book.groupName) · \(progressText(book))")
+                            Text(progressText(book))
                                 .font(.caption)
                                 .foregroundStyle(ShelfInk.secondary)
                             if !book.currentChapterTitle.isEmpty {
@@ -347,17 +312,15 @@ struct BookshelfView: View {
             Image(systemName: "books.vertical")
                 .font(.system(size: 42))
                 .foregroundStyle(ShelfInk.accent)
-            Text(books.isEmpty ? "书架还是空的" : "这个分组里没有书")
+            Text("书架还是空的")
                 .font(.headline)
                 .foregroundStyle(ShelfInk.ink)
-            if books.isEmpty {
-                Text("点右上角加号导入 txt 或 EPUB，也可以先读示例。")
-                    .font(.subheadline)
-                    .foregroundStyle(ShelfInk.secondary)
-                    .multilineTextAlignment(.center)
-                Button("放入示例《灯塔邮局》", action: openSample)
-                    .buttonStyle(.borderedProminent)
-            }
+            Text("点右上角加号导入 txt 或 EPUB，也可以先读示例。")
+                .font(.subheadline)
+                .foregroundStyle(ShelfInk.secondary)
+                .multilineTextAlignment(.center)
+            Button("放入示例《灯塔邮局》", action: openSample)
+                .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 48)
@@ -384,7 +347,7 @@ struct BookshelfView: View {
             }
             .accessibilityLabel("导入书籍")
         }
-        .font(.body.weight(.semibold))
+        .font(.system(size: 20, weight: .semibold))
         .foregroundStyle(ShelfInk.ink)
         .padding(.horizontal, 8)
         .padding(.top, 4)
@@ -392,7 +355,6 @@ struct BookshelfView: View {
 
     private var shelfMenu: some View {
         Menu {
-            Button { addingGroup = true } label: { Label("新建分组", systemImage: "folder.badge.plus") }
             Button { importingFont = true } label: { Label("导入字体", systemImage: "textformat") }
             Divider()
             Picker("排序", selection: $sortRaw) {
@@ -407,6 +369,7 @@ struct BookshelfView: View {
             }
         } label: {
             Image(systemName: "folder")
+                .font(.system(size: 20, weight: .semibold))
                 .frame(width: 44, height: 44)
         }
         .accessibilityLabel("整理书架")
@@ -444,16 +407,6 @@ struct BookshelfView: View {
         .buttonStyle(.plain)
     }
 
-    private func groupChip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .font(.subheadline.weight(selected ? .semibold : .regular))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(selected ? ShelfInk.accent : ShelfInk.chip, in: Capsule())
-            .foregroundStyle(selected ? Color.white : ShelfInk.ink)
-            .buttonStyle(.plain)
-    }
-
     @ViewBuilder
     private func bookMenu(_ book: BookRecord) -> some View {
         Button {
@@ -461,14 +414,6 @@ struct BookshelfView: View {
             try? modelContext.save()
         } label: {
             Label(book.isPinned ? "取消置顶" : "置顶", systemImage: book.isPinned ? "pin.slash" : "pin")
-        }
-        Menu("移动到分组") {
-            ForEach(groups, id: \.self) { name in
-                Button(name) {
-                    book.groupName = name
-                    try? modelContext.save()
-                }
-            }
         }
         Button("删除", role: .destructive) { pendingDelete = book }
     }
