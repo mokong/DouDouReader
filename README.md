@@ -1,0 +1,84 @@
+# 豆豆阅读
+
+豆豆阅读（DouDouReader）是一个本地小说阅读器，用 SwiftUI 写，能在 iPhone、iPad、Mac 和 Apple Vision 上打开。书架上的书来自导入的纯文本，也可以从书源目录按章下载。
+
+## 功能
+
+- 导入 txt。编码按 UTF-8（含 BOM）、UTF-16、GB18030 识别。单本上限 40MB。文件名当作书名，正文前 30 行里的「作者」会记成作者。
+- 内置一篇示例小说，用来直接打开阅读器。
+- 按章节标题拆分正文。识别 `第…章/回/节/卷/部/集`、`序章`、`楔子`、`前言`、`引子`、`尾声`、`后记`、`番外` 和 `Chapter N`。没有标题时整本算一章。
+- 书架支持分组、置顶、搜索，以及按最近阅读、加入时间、书名排序。封面和列表可以切换。
+- 阅读器使用 TextKit 1 分页。翻页有仿真、左右、上下和无动画。点页面中央唤出工具栏。
+- 目录、书内搜索、书签。
+- 排版：字号、字体、行距、段距、首行缩进、字距、对齐、边距、简繁转换、屏蔽词。
+- 主题：自动、纸白、护眼、羊皮、烟灰、夜间。自动主题跟随系统外观。书架本身固定为暖纸色。
+- 自动翻页、定时停止、屏幕常亮、亮度。页眉页脚可显示时间、电量、章节名和进度。
+- 系统语音朗读，按页或按章，后台可继续播放。
+- 导入 TTF / OTF 作为阅读字体。
+- 书源：内置一批目录站，也可以粘贴「阅读 3.0」或香色闺阁的书源 JSON。在线书先保存第一章，翻到已加载章节的最后一页时再请求下一章。同一本书再次打开会回到已下载的进度。
+
+## 环境
+
+| 项目 | 值 |
+| --- | --- |
+| 显示名 | 豆豆阅读 |
+| Bundle ID | `com.morganwang.DouDouReader` |
+| 版本 | 1.0 |
+| 语言 | Swift 5 |
+| 系统 | iOS 17.6、macOS 15.6、visionOS 26.6 |
+| 工程 | `DouDouReader.xcodeproj` |
+
+用当前的 Xcode 打开工程即可。签名是自动管理。
+
+## 运行
+
+1. 打开 `DouDouReader.xcodeproj`。
+2. Scheme 选择 `DouDouReader`。
+3. 运行目标选 iPhone 模拟器、My Mac 或 visionOS 模拟器。
+
+命令行编译 Mac 版：
+
+```bash
+xcodebuild -project DouDouReader.xcodeproj -scheme DouDouReader -destination 'platform=macOS' -configuration Debug build
+```
+
+`DouDouReader/` 使用 Xcode 的同步目录。在这个目录里新增的 Swift 文件会自动编进目标，不用改 `project.pbxproj`。
+
+## 自检
+
+启动参数 `-selfTest` 会跑本地逻辑检查（分章、分页、编码、简繁、书源解析、ATS 配置等），然后退出。通过时控制台打印 `LOGIC_OK`。
+
+在 Scheme → Run → Arguments 里加上 `-selfTest`，或给已编译的 Mac 应用传这个参数。
+
+`-openSources` 会在启动后直接进入书源页。
+
+## 目录
+
+```
+DouDouReader-Info.plist          文档类型、后台音频、ATS
+DouDouReader/
+  App/                           入口、系统外观
+  Library/                       书架、书目、导入、示例小说
+  Text/                          解码、分章、简繁、分页
+  Reader/                        阅读器、排版、主题、朗读
+  BookSource/                    书源规则、目录抓取、预设站点
+  Diagnostics/                   -selfTest 用的逻辑检查
+  Assets.xcassets/
+```
+
+## 数据
+
+书架、书签和书源存在 SwiftData 里。正文和导入的字体写在本应用的 Application Support 目录：
+
+```
+Application Support/DouDouReader/Books
+Application Support/DouDouReader/Fonts
+```
+
+阅读进度跟着这本书保存在本机。
+
+## 书源和网络
+
+部分预设站点是明文 HTTP。`DouDouReader-Info.plist` 里 `NSAppTransportSecurity` 只保留 `NSAllowsArbitraryLoads`。不要再加 `NSAllowsLocalNetworking`、`NSAllowsArbitraryLoadsInWebContent` 或 `NSAllowsArbitraryLoadsForMedia`。从 iOS 10 和 macOS 10.12 起，这些键存在时系统会忽略全局放行，HTTP 书源会被 ATS 拦住。
+
+手动填写的书源地址只接受 HTTPS，以及本机和局域网的 HTTP。预设目录的请求按站点自己的地址发出。
