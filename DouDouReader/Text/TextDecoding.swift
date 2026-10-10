@@ -1,6 +1,6 @@
 import Foundation
 
-enum TextDecoding {
+nonisolated enum TextDecoding {
     static func decode(_ data: Data) -> String? {
         guard !data.isEmpty else { return nil }
         if data.starts(with: [0xEF, 0xBB, 0xBF]) {

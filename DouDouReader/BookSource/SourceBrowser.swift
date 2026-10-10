@@ -75,9 +75,11 @@ struct SourceBrowserView: View {
                 .accessibilityHint("打开书源选择")
             }
         }
+        #if os(iOS) || os(visionOS)
         .toolbarBackground(Color.black, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
+        #endif
         .preferredColorScheme(.dark)
         .tint(Color(red: 0.2, green: 0.6, blue: 1.0))
         .sheet(isPresented: $showSwitchSheet) {

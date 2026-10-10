@@ -194,6 +194,8 @@ struct BookshelfView: View {
     private var textTypes: [UTType] {
         var types: [UTType] = [.plainText, .utf8PlainText, .text]
         if let txt = UTType(filenameExtension: "txt") { types.append(txt) }
+        if let epub = UTType("org.idpf.epub-container") { types.append(epub) }
+        if let epub = UTType(filenameExtension: "epub") { types.append(epub) }
         return types
     }
 
@@ -459,7 +461,7 @@ struct BookshelfView: View {
 
     private var addMenu: some View {
         Menu {
-            Button { importingText = true } label: { Label("导入文本", systemImage: "doc.text") }
+            Button { importingText = true } label: { Label("导入书籍", systemImage: "doc.text") }
             Button { importingFont = true } label: { Label("导入字体", systemImage: "textformat") }
             Button(action: openSample) { Label("示例小说", systemImage: "book") }
             Button(action: openSources) { Label("书源", systemImage: "dot.radiowaves.left.and.right") }

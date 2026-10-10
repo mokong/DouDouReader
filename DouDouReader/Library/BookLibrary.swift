@@ -151,11 +151,17 @@ enum BookLibrary {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    static func importText(_ raw: String, suggestedTitle: String, context: ModelContext) throws -> ImportedBook {
+    static func importText(
+        _ raw: String,
+        suggestedTitle: String,
+        author: String = "",
+        context: ModelContext
+    ) throws -> ImportedBook {
         let text = TextDecoding.normalize(raw)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ImportError.empty
         }
+        guard text.utf8.count <= BookStorage.byteLimit else { throw ImportError.tooLarge }
         let digest = hash(text)
         if let existing = find(hash: digest, in: context) {
             return ImportedBook(book: existing, isNew: false)
@@ -163,9 +169,10 @@ enum BookLibrary {
         let fileName = try BookStorage.write(text)
         let trimmed = suggestedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = trimmed.isEmpty ? "未命名" : trimmed
+        let namedAuthor = author.trimmingCharacters(in: .whitespacesAndNewlines)
         let book = BookRecord(
             title: title,
-            author: BookMetadata.author(in: text),
+            author: namedAuthor.isEmpty ? BookMetadata.author(in: text) : namedAuthor,
             fileName: fileName,
             contentHash: digest,
             coverHue: BookMetadata.coverHue(for: title),
@@ -185,6 +192,12 @@ enum BookLibrary {
         }
         let data = try Data(contentsOf: url)
         guard data.count <= BookStorage.byteLimit else { throw ImportError.tooLarge }
+        if EpubParser.isEpub(data, filename: url.lastPathComponent) {
+            let book = try EpubParser.parse(data)
+            let trimmed = book.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let suggested = trimmed.isEmpty ? BookMetadata.title(from: url.lastPathComponent) : trimmed
+            return try importText(book.text, suggestedTitle: suggested, author: book.author, context: context)
+        }
         guard let decoded = TextDecoding.decode(data) else { throw ImportError.unreadableEncoding }
         return try importText(
             decoded,

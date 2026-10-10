@@ -38,6 +38,7 @@ enum LogicChecks {
         checkSources(&errors)
         checkTransportPolicy(&errors)
         checkBookSourceParsing(&errors)
+        checkEpub(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -1362,5 +1363,355 @@ enum LogicChecks {
             return .success(value)
         }
         return .failure(ProbeFailure(description: box.failure ?? "没有结果"))
+    }
+
+    private static func checkEpub(_ errors: inout [String]) {
+        let marked = ChapterSplitter.forcedHeadingPrefix + "Chapter 9: The long road goes on past the gate"
+        if !ChapterSplitter.isHeading(marked)
+            || ChapterSplitter.displayTitle(marked) != "Chapter 9: The long road goes on past the gate" {
+            errors.append("EPUB 强制标题没有被识别")
+        }
+        if ChapterSplitter.isHeading("Chapter 9: The long road goes on past the gate") {
+            errors.append("带标点的长标题不该被普通规则认成章节")
+        }
+        do {
+            let book = try EpubParser.parse(sampleEpub())
+            if book.title != "豆豆 EPUB" || book.author != "测试作者" {
+                errors.append("EPUB 书名或作者不符 \(book.title) / \(book.author)")
+            }
+            if book.text.contains("封面不要进来") {
+                errors.append("EPUB 把非正文封面读进来了")
+            }
+            let slices = ChapterSplitter.split(book.text, fallbackTitle: book.title)
+            let titles = slices.map(\.title)
+            if titles != ["第一章 雨", "终章：风", "序章", "Chapter 3: End"] {
+                errors.append("EPUB 章节不符 \(titles)")
+            }
+            for needle in ["正文甲，下了雨。", "第二段。", "正文乙，起了风。", "序的正文。", "结尾。"] where !book.text.contains(needle) {
+                errors.append("EPUB 正文缺少 \(needle)")
+            }
+            if let wind = slices.first(where: { $0.title == "终章：风" }) {
+                let body = ChapterSplitter.substring(book.text, start: wind.bodyStart, end: wind.bodyEnd)
+                if body.contains("终章") {
+                    errors.append("EPUB 章节正文重复了标题")
+                }
+            }
+        } catch {
+            errors.append("EPUB 解析失败 \((error as? LocalizedError)?.errorDescription ?? String(describing: error))")
+        }
+
+        do {
+            let headed = try EpubParser.parse(headingEpub())
+            let titles = ChapterSplitter.split(headed.text, fallbackTitle: headed.title).map(\.title)
+            if titles != ["Chapter 1: Rain", "Chapter 2: Wind"]
+                || !headed.text.contains("甲的正文")
+                || !headed.text.contains("乙的正文") {
+                errors.append("同一文件里的标题没有拆成章节 \(titles)")
+            }
+        } catch {
+            errors.append("标题拆章失败 \((error as? LocalizedError)?.errorDescription ?? String(describing: error))")
+        }
+
+        do {
+            let legacy = try EpubParser.parse(ncxEpub())
+            let titles = ChapterSplitter.split(legacy.text, fallbackTitle: legacy.title).map(\.title)
+            if legacy.title != "旧书" || titles != ["楔子"] || !legacy.text.contains("旧目录正文") {
+                errors.append("NCX 目录没有成为章节 \(titles)")
+            }
+        } catch {
+            errors.append("NCX EPUB 解析失败 \((error as? LocalizedError)?.errorDescription ?? String(describing: error))")
+        }
+
+        do {
+            let archive = try ZipArchive.open(deflateZip())
+            let hello = try archive.file("hello.txt")
+            let blob = try archive.file("blob.txt")
+            let expectedBlob = Data(String(repeating: "甲乙丙丁戊己庚辛。", count: 300).utf8)
+            if hello != Data("你好，章节。".utf8) || blob != expectedBlob {
+                errors.append("EPUB 的 deflate 没有解开")
+            }
+        } catch {
+            errors.append("deflate 解压失败 \(error)")
+        }
+
+        do {
+            _ = try EpubParser.parse(Data("不是电子书".utf8))
+            errors.append("坏 EPUB 应当失败")
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? ""
+            if message != "这本 EPUB 打不开" {
+                errors.append("坏 EPUB 的提示不符 \(message)")
+            }
+        }
+
+        do {
+            _ = try EpubParser.parse(encryptedEpub())
+            errors.append("加密 EPUB 应当失败")
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? ""
+            if message != "这本 EPUB 加了密，打不开" {
+                errors.append("加密 EPUB 的提示不符 \(message)")
+            }
+        }
+    }
+
+    private static func sampleEpub() -> Data {
+        let container = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles>
+            <rootfile full-path="OEBPS/book.opf" media-type="application/oebps-package+xml"/>
+          </rootfiles>
+        </container>
+        """
+        let opf = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+          <metadata>
+            <dc:title>豆豆 EPUB</dc:title>
+            <dc:creator opf:role="aut">测试作者</dc:creator>
+            <dc:language>zh-CN</dc:language>
+          </metadata>
+          <manifest>
+            <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/>
+            <item id="split" href="split.xhtml" media-type="application/xhtml+xml"/>
+            <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+          </manifest>
+          <spine>
+            <itemref idref="cover" linear="no"/>
+            <itemref idref="c1"/>
+            <itemref idref="c2"/>
+            <itemref idref="split"/>
+          </spine>
+        </package>
+        """
+        let cover = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>封面不要进来</p></body></html>"
+        let c1 = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>第一章 雨</title></head><body><h1>第一章 雨</h1><p>正文甲，下了雨。</p><p>第二段。</p></body></html>"
+        let c2 = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><h1>终章：风</h1><p>正文乙，起了风。</p></body></html>"
+        let split = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><section id=\"a\"><h2>序章</h2><p>序的正文。</p></section><section id=\"b\"><h2>Chapter 3: End</h2><p>结尾。</p></section></body></html>"
+        let nav = """
+        <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+          <body><nav epub:type="toc"><ol>
+            <li><a href="c1.xhtml">第一章 雨</a></li>
+            <li><a href="c2.xhtml">终章：风</a></li>
+            <li><a href="split.xhtml#a">序章</a></li>
+            <li><a href="split.xhtml#b">Chapter 3: End</a></li>
+          </ol></nav></body>
+        </html>
+        """
+        return zipParts([
+            ZipPart(name: "mimetype", plain: Data("application/epub+zip".utf8)),
+            ZipPart(name: "META-INF/container.xml", plain: Data(container.utf8)),
+            ZipPart(name: "OEBPS/book.opf", plain: Data(opf.utf8)),
+            ZipPart(name: "OEBPS/cover.xhtml", plain: Data(cover.utf8)),
+            ZipPart(name: "OEBPS/c1.xhtml", plain: Data(c1.utf8)),
+            ZipPart(name: "OEBPS/c2.xhtml", plain: Data(c2.utf8), compressed: hexBytes("b3b1afc8cd51284b2d2acecccfb35532d433505248cd4bce4fc9cc4bb7552a2d49d3b550b2b7e3b2c928012a032acd2bb655ca282929b0d2d72f2f2fd72b37d6cb2f4ad737b4b4b4d4af00a951b2b349ca4fa9b4b3c930b47bbebbe3f9ea05eff7cc7ab9b8cf461f28605360f76cede267d3da9fec9cf97e4fcf8baddb9fec6a034a3e6e68b2d12fb0b3d18768d50719640700")),
+            ZipPart(name: "OEBPS/split.xhtml", plain: Data(split.utf8)),
+            ZipPart(name: "OEBPS/nav.xhtml", plain: Data(nav.utf8)),
+        ])
+    }
+
+    private static func headingEpub() -> Data {
+        let container = """
+        <?xml version="1.0"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="book.opf" media-type="application/oebps-package+xml"/></rootfiles>
+        </container>
+        """
+        let opf = """
+        <?xml version="1.0"?>
+        <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+          <metadata><dc:title>标题拆章</dc:title><dc:creator>豆豆</dc:creator></metadata>
+          <manifest><item id="c" href="c.xhtml" media-type="application/xhtml+xml"/></manifest>
+          <spine><itemref idref="c"/></spine>
+        </package>
+        """
+        let chapter = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><h1>Chapter 1: Rain</h1><p>甲的正文。</p><h1>Chapter 2: Wind</h1><p>乙的正文。</p></body></html>"
+        return zipParts([
+            ZipPart(name: "mimetype", plain: Data("application/epub+zip".utf8)),
+            ZipPart(name: "META-INF/container.xml", plain: Data(container.utf8)),
+            ZipPart(name: "book.opf", plain: Data(opf.utf8)),
+            ZipPart(name: "c.xhtml", plain: Data(chapter.utf8)),
+        ])
+    }
+
+    private static func ncxEpub() -> Data {
+        let container = """
+        <?xml version="1.0"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="book.opf" media-type="application/oebps-package+xml"/></rootfiles>
+        </container>
+        """
+        let opf = """
+        <?xml version="1.0"?>
+        <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+          <metadata><dc:title>旧书</dc:title><dc:creator>旧作者</dc:creator></metadata>
+          <manifest>
+            <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+            <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+          </manifest>
+          <spine toc="ncx"><itemref idref="c"/></spine>
+        </package>
+        """
+        let chapter = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>旧目录正文。</p></body></html>"
+        let ncx = """
+        <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+          <navMap>
+            <navPoint id="n1" playOrder="1">
+              <navLabel><text>楔子</text></navLabel>
+              <content src="c.xhtml"/>
+            </navPoint>
+          </navMap>
+        </ncx>
+        """
+        return zipParts([
+            ZipPart(name: "mimetype", plain: Data("application/epub+zip".utf8)),
+            ZipPart(name: "META-INF/container.xml", plain: Data(container.utf8)),
+            ZipPart(name: "book.opf", plain: Data(opf.utf8)),
+            ZipPart(name: "c.xhtml", plain: Data(chapter.utf8)),
+            ZipPart(name: "toc.ncx", plain: Data(ncx.utf8)),
+        ])
+    }
+
+    private static func encryptedEpub() -> Data {
+        let container = """
+        <?xml version="1.0"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="book.opf" media-type="application/oebps-package+xml"/></rootfiles>
+        </container>
+        """
+        let opf = """
+        <?xml version="1.0"?>
+        <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+          <metadata><dc:title>密文</dc:title></metadata>
+          <manifest><item id="c" href="c.xhtml" media-type="application/xhtml+xml"/></manifest>
+          <spine><itemref idref="c"/></spine>
+        </package>
+        """
+        return zipParts([
+            ZipPart(name: "mimetype", plain: Data("application/epub+zip".utf8)),
+            ZipPart(name: "META-INF/container.xml", plain: Data(container.utf8)),
+            ZipPart(name: "book.opf", plain: Data(opf.utf8)),
+            ZipPart(name: "c.xhtml", plain: Data("<p>秘密</p>".utf8), encrypted: true),
+        ])
+    }
+
+    private static func deflateZip() -> Data {
+        zipParts([
+            ZipPart(
+                name: "hello.txt",
+                plain: Data("你好，章节。".utf8),
+                compressed: hexBytes("7bb277c1d3a57bdfefe979be7ac18baea6c70d4d00")
+            ),
+            ZipPart(
+                name: "blob.txt",
+                plain: Data(String(repeating: "甲乙丙丁戊己庚辛。", count: 300).utf8),
+                compressed: hexBytes("edc9b91140400000c0d69dc88825a882e48e4033ee510645087766b36dd39e8f39a74fa8c358e256cee5b9d6bbeb9b524a29a594524a29a594524a29a594524a29a5feab17")
+            ),
+        ])
+    }
+
+    private struct ZipPart {
+        var name: String
+        var plain: Data
+        var compressed: Data? = nil
+        var encrypted: Bool = false
+    }
+
+    private static func zipParts(_ parts: [ZipPart]) -> Data {
+        var local = Data()
+        var central = Data()
+        for part in parts {
+            let name = Data(part.name.utf8)
+            let payload = part.compressed ?? part.plain
+            let method: UInt16 = part.compressed == nil ? 0 : 8
+            var flags: UInt16 = 1 << 11
+            if part.encrypted { flags |= 1 }
+            let offset = UInt32(local.count)
+            append32(0x04034B50, to: &local)
+            append16(20, to: &local)
+            append16(flags, to: &local)
+            append16(method, to: &local)
+            append16(0, to: &local)
+            append16(0, to: &local)
+            append32(zipCRC(part.plain), to: &local)
+            append32(UInt32(payload.count), to: &local)
+            append32(UInt32(part.plain.count), to: &local)
+            append16(UInt16(name.count), to: &local)
+            append16(0, to: &local)
+            local.append(name)
+            local.append(payload)
+
+            append32(0x02014B50, to: &central)
+            append16(20, to: &central)
+            append16(20, to: &central)
+            append16(flags, to: &central)
+            append16(method, to: &central)
+            append16(0, to: &central)
+            append16(0, to: &central)
+            append32(zipCRC(part.plain), to: &central)
+            append32(UInt32(payload.count), to: &central)
+            append32(UInt32(part.plain.count), to: &central)
+            append16(UInt16(name.count), to: &central)
+            append16(0, to: &central)
+            append16(0, to: &central)
+            append16(0, to: &central)
+            append16(0, to: &central)
+            append32(0, to: &central)
+            append32(offset, to: &central)
+            central.append(name)
+        }
+        let directoryOffset = UInt32(local.count)
+        var archive = local
+        archive.append(central)
+        append32(0x06054B50, to: &archive)
+        append16(0, to: &archive)
+        append16(0, to: &archive)
+        append16(UInt16(parts.count), to: &archive)
+        append16(UInt16(parts.count), to: &archive)
+        append32(UInt32(central.count), to: &archive)
+        append32(directoryOffset, to: &archive)
+        append16(0, to: &archive)
+        return archive
+    }
+
+    private static func zipCRC(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                let mask: UInt32 = (crc & 1) == 1 ? 0xEDB8_8320 : 0
+                crc = (crc >> 1) ^ mask
+            }
+        }
+        return ~crc
+    }
+
+    private static func append16(_ value: UInt16, to data: inout Data) {
+        data.append(UInt8(value & 0xFF))
+        data.append(UInt8(value >> 8))
+    }
+
+    private static func append32(_ value: UInt32, to data: inout Data) {
+        var remaining = value
+        for _ in 0..<4 {
+            data.append(UInt8(remaining & 0xFF))
+            remaining >>= 8
+        }
+    }
+
+    private static func hexBytes(_ hex: String) -> Data {
+        var data = Data()
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            if let byte = UInt8(hex[index..<next], radix: 16) {
+                data.append(byte)
+            }
+            index = next
+        }
+        return data
     }
 }

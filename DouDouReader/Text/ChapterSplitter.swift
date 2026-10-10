@@ -8,7 +8,10 @@ struct ChapterSlice: Equatable, Sendable {
     var bodyEnd: Int
 }
 
-enum ChapterSplitter {
+nonisolated enum ChapterSplitter {
+    /// EPUB 标题常常带标点，也不一定写成「第…章」。这一行以不可见分隔符开头时，整行就是章节标题。
+    static let forcedHeadingPrefix = "\u{2063}"
+
     private static let pattern = #"^(第[0-9０-９零〇一二三四五六七八九十百千万两]{1,12}[章回节卷部集].*|序\s*章.*|楔\s*子.*|前\s*言.*|引\s*子.*|尾\s*声.*|后\s*记.*|番外.*|[Cc]hapter\s+\d+.*)$"#
     private static let punctuation = CharacterSet(charactersIn: "，。！？；：、,.!?;:")
 
@@ -24,7 +27,7 @@ enum ChapterSplitter {
             let lineRange = ns.lineRange(for: NSRange(location: location, length: 0))
             let trimmed = ns.substring(with: lineRange).trimmingCharacters(in: .whitespacesAndNewlines)
             if isHeading(trimmed) {
-                marks.append((trimmed, lineRange.location, NSMaxRange(lineRange)))
+                marks.append((displayTitle(trimmed), lineRange.location, NSMaxRange(lineRange)))
             }
             let next = NSMaxRange(lineRange)
             if next <= location { break }
@@ -83,10 +86,21 @@ enum ChapterSplitter {
     }
 
     static func isHeading(_ line: String) -> Bool {
+        if line.hasPrefix(forcedHeadingPrefix) {
+            return !displayTitle(line).isEmpty
+        }
         guard !line.isEmpty, line.count <= 40 else { return false }
         guard line.rangeOfCharacter(from: punctuation) == nil else { return false }
         guard let regex else { return false }
         let range = NSRange(location: 0, length: (line as NSString).length)
         return regex.firstMatch(in: line, options: [], range: range) != nil
+    }
+
+    static func displayTitle(_ line: String) -> String {
+        var title = line
+        if title.hasPrefix(forcedHeadingPrefix) {
+            title.removeFirst()
+        }
+        return title.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
