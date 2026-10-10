@@ -49,7 +49,7 @@ nonisolated struct PresetBookSourceItem: Identifiable, Sendable {
 
 /// 常用精选预设书源库（阅读 3.0 与香色闺阁热门书源）
 enum PresetBookSources {
-    /// 10 个对照过线上页面的预设书源。发现列表、目录和至少一章正文都能从 HTML 里解析出来。
+    /// 对照过线上页面的预设书源。发现列表、目录和至少一章正文都能从 HTML 里解析出来。
     static let all: [PresetBookSourceItem] = {
         var items = verifiedPresets()
         for index in items.indices {
@@ -63,7 +63,7 @@ enum PresetBookSources {
 
     /// 这些站点的首页或分类页能列出书，书籍页能进到章节正文。
     private static func verifiedPresets() -> [PresetBookSourceItem] {
-        [
+        var items: [PresetBookSourceItem] = [
             xiangshuPreset(),
             catalogPreset(
                 id: "preset-bijian",
@@ -152,6 +152,8 @@ enum PresetBookSources {
                 weight: 8900
             )
         ]
+        items.append(contentsOf: extraVerifiedPresets())
+        return items
     }
 
     /// 香书小说。规则写成香色闺阁的 XPath，页面结构和下面几家笔趣阁相同。
@@ -326,7 +328,7 @@ enum PresetBookSources {
             id: "preset-biqu365",
             name: "笔趣阁365",
             kind: .legado,
-            summary: "笔趣阁365 的更新列表和搜索结果都有书名。正文按页拆开，先读到第一页。",
+            summary: "笔趣阁365 的更新列表和搜索结果都有书名。完整目录在「全部章节」，一章的各页已经在同一段正文里。",
             sourceURL: base,
             weight: 9300,
             search: SourceSearchRule(
@@ -337,12 +339,20 @@ enum PresetBookSources {
                 detailURLSelector: detail
             ),
             toc: SourceTocRule(
+                // 详情页只有最新几章。完整目录是「全部章节」链到的 /newbook/，列表是 ul.info。
                 tocURLSelector: "div.gongneng a@href",
-                listSelector: "div.info li a",
+                listSelector: "ul.info li a",
                 nameSelector: "text",
                 urlSelector: "href"
             ),
-            content: SourceContentRule(contentSelector: "#txt@text"),
+            content: SourceContentRule(
+                contentSelector: "#txt@text",
+                replaceRules: [
+                    "##一秒记住【笔趣阁】[^\\n]*##",
+                    "##(?m)^(?:（本章未完，请点击下一页继续阅读）)?第[0-9０-９零〇一二三四五六七八九十百千万两][^\\n]{0,80}(?:\\(第\\d+/\\d+页\\)|（第\\d+/\\d+页）)\\s*$##",
+                    "##（本章未完，请点击下一页继续阅读）##"
+                ]
+            ),
             explore: SourceExploreRule(
                 urlTemplate: lines.joined(separator: "\n"),
                 listSelector: list,
@@ -453,7 +463,7 @@ enum PresetBookSources {
         )
     }
 
-    private static func makePreset(
+    static func makePreset(
         id: String,
         name: String,
         kind: BookSourceKind,
@@ -521,6 +531,24 @@ enum PresetBookSources {
         add("preset-ujxsw", "悠久小说网", "www.ujxsw.org", "文本/小说")
         add("preset-b5200", "笔趣阁5200", "www.b5200.net", "文本/小说")
         add("preset-shuqu", "书趣阁", "www.xshuquge.net", "文本/小说")
+        add("preset-biqu345", "笔趣阁345", "www.biquge345.com", "文本/小说")
+        add("preset-biqu543", "笔趣阁543", "www.biquge543.com", "文本/小说")
+        add("preset-8tsw", "八天书屋", "www.8tsw.com", "文本/小说")
+        add("preset-biqu123", "笔趣阁123", "www.biquge123.com", "文本/小说")
+        add("preset-xbiquges", "新笔趣阁", "www.xbiquges.com", "文本/小说")
+        add("preset-biquicu", "绿色笔趣阁", "www.biquge.icu", "文本/小说")
+        add("preset-biqupro", "笔趣阁Pro", "www.biquge.pro", "文本/小说")
+        add("preset-biqugesite", "笔趣阁站", "www.biquge.site", "文本/小说")
+        add("preset-xshuohu", "小说虎", "www.xiaoshuohu.com", "文本/小说")
+        add("preset-haima", "海马文学", "www.haimawx.com", "文本/小说")
+        add("preset-bajie", "八戒小说", "www.bajiewx.com", "文本/小说")
+        add("preset-xunxiang", "寻香文学", "www.xx2.org", "文本/小说")
+        add("preset-69shuicu", "69中文", "www.69shu.icu", "文本/小说")
+        add("preset-aisiluke", "思路客", "aisiluke.com", "文本/小说")
+        add("preset-isiluke", "思路客文", "www.isiluke.la", "文本/小说")
+        add("preset-hetushu", "和图书", "hetushu.com", "文本/小说")
+        add("preset-bkneng", "不可能的世界", "wenxue.bkneng.com", "文本/小说")
+        add("preset-sangshu", "九九藏书", "www.sangshixs.com", "文本/小说")
 
         add("site-zongheng", "纵横中文网", "www.zongheng.com", "TOP", icon: "🦁", note: "(索引源,QQ频道:香色闺阁)")
         add("site-shuqi", "书旗小说", "www.shuqi.com", "文本/小说", note: "(只用于看榜单)")

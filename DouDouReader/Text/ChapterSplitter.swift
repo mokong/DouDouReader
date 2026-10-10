@@ -1,11 +1,22 @@
 import Foundation
 
-struct ChapterSlice: Equatable, Sendable {
+nonisolated struct ChapterSlice: Equatable, Sendable {
     var index: Int
     var title: String
     var lineStart: Int
     var bodyStart: Int
     var bodyEnd: Int
+    /// 在线目录里的下标。本地书与 index 相同。
+    var remoteIndex: Int
+
+    init(index: Int, title: String, lineStart: Int, bodyStart: Int, bodyEnd: Int, remoteIndex: Int? = nil) {
+        self.index = index
+        self.title = title
+        self.lineStart = lineStart
+        self.bodyStart = bodyStart
+        self.bodyEnd = bodyEnd
+        self.remoteIndex = remoteIndex ?? index
+    }
 }
 
 nonisolated enum ChapterSplitter {

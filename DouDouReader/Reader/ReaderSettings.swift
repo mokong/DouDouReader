@@ -114,6 +114,8 @@ final class ReaderSettingsStore {
     var kern: Double = 0 { didSet { persist() } }
     var alignment: Int = 0 { didSet { persist() } }
     var themeID: String = "auto" { didSet { persist() } }
+    /// 点「夜间」之前的主题，再点一次就回到这里。
+    var dayThemeID: String = "paper" { didSet { persist() } }
     var pageModeRaw: String = PageTurnMode.curl.rawValue { didSet { persist() } }
     var scriptRaw: Int = 0 { didSet { persist() } }
     var brightness: Double = 1 { didSet { persist() } }
@@ -182,6 +184,7 @@ final class ReaderSettingsStore {
             kern = stored.kern
             alignment = stored.alignment
             themeID = stored.themeID
+            dayThemeID = stored.dayThemeID
             pageModeRaw = stored.pageModeRaw
             scriptRaw = stored.scriptRaw
             brightness = stored.brightness
@@ -267,6 +270,7 @@ final class ReaderSettingsStore {
         var kern: Double
         var alignment: Int
         var themeID: String
+        var dayThemeID: String
         var pageModeRaw: String
         var scriptRaw: Int
         var brightness: Double
@@ -295,6 +299,7 @@ final class ReaderSettingsStore {
             kern = store.kern
             alignment = store.alignment
             themeID = store.themeID
+            dayThemeID = store.dayThemeID
             pageModeRaw = store.pageModeRaw
             scriptRaw = store.scriptRaw
             brightness = store.brightness
@@ -325,6 +330,7 @@ final class ReaderSettingsStore {
             kern = try c.decodeIfPresent(Double.self, forKey: .kern) ?? 0
             alignment = try c.decodeIfPresent(Int.self, forKey: .alignment) ?? 0
             themeID = try c.decodeIfPresent(String.self, forKey: .themeID) ?? "auto"
+            dayThemeID = try c.decodeIfPresent(String.self, forKey: .dayThemeID) ?? "paper"
             pageModeRaw = try c.decodeIfPresent(String.self, forKey: .pageModeRaw) ?? PageTurnMode.curl.rawValue
             scriptRaw = try c.decodeIfPresent(Int.self, forKey: .scriptRaw) ?? 0
             brightness = try c.decodeIfPresent(Double.self, forKey: .brightness) ?? 1

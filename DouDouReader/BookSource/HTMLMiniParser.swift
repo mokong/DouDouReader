@@ -15,10 +15,16 @@ nonisolated final class HTMLNode: @unchecked Sendable {
         self.children = []
     }
 
-    /// 提取该节点及其所有子节点的合并文本内容
+    /// 提取该节点及其所有子节点的合并文本内容。`<br>` 是换行，不然正文会连成一段。
     var allText: String {
         var result = text
         for child in children {
+            if child.tag == "br" {
+                if !result.hasSuffix("\n") {
+                    result += "\n"
+                }
+                continue
+            }
             let childText = child.allText
             if !childText.isEmpty {
                 if !result.isEmpty && !result.hasSuffix("\n") && !result.hasSuffix(" ") {

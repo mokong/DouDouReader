@@ -27,6 +27,8 @@ nonisolated struct OnlineOpening: Sendable {
     var author: String
     var text: String
     var chapters: [RemoteChapterRef]
+    /// 打开时已经下载的第一章正文，不含书名和作者行。
+    var openingBody: String = ""
 }
 
 nonisolated struct CatalogBook: Identifiable, Equatable, Sendable {
@@ -319,7 +321,8 @@ nonisolated struct RemoteBookCatalog: IncrementalBookCatalog {
             title: title.isEmpty ? "未命名" : title,
             author: detail.author,
             text: text,
-            chapters: refs
+            chapters: refs,
+            openingBody: body.content
         )
     }
 

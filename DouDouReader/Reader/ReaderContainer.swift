@@ -124,6 +124,8 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         if let next = engine.neighbor(after: page.position) {
             return makePage(next)
         }
+        // 还停在章节交界时，不能再翻出“全书完”。
+        if page.position.boundaryRemote != nil { return nil }
         guard page.position.chapterIndex < engine.chapters.count else { return nil }
         return makePage(ReaderPosition(chapterIndex: engine.chapters.count, pageIndex: 0))
     }
@@ -205,7 +207,7 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
     }
 
     private func makePage(_ position: ReaderPosition) -> PageContentController {
-        let terminal = position.chapterIndex >= engine.chapters.count
+        let terminal = engine.isTerminal(position)
         let laid = terminal ? nil : engine.layout(for: position.chapterIndex)
         let page = PageContentController(
             position: position,
@@ -213,8 +215,8 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
             theme: theme,
             textRect: textRect,
             terminal: terminal,
-            terminalTitle: engine.endTitle,
-            terminalDetail: engine.endDetail,
+            terminalTitle: engine.terminalTitle(for: position),
+            terminalDetail: engine.terminalDetail(for: position),
             fontName: settings.fontName
         )
         if position == engine.position {
@@ -312,7 +314,7 @@ final class PageContentController: UIViewController {
         detailLabel.textAlignment = .center
         detailLabel.font = PlatformFont.make(name: fontName, size: 15)
         titleLabel.isHidden = !terminal
-        detailLabel.isHidden = !terminal
+        detailLabel.isHidden = !terminal || terminalDetail.isEmpty
         apply(textRect: textRect, theme: theme, fontName: fontName)
     }
 

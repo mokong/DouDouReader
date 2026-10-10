@@ -560,9 +560,11 @@ struct SourceBrowserView: View {
             let imported = try BookLibrary.importOnline(
                 text: opening.text,
                 suggestedTitle: importedTitle.isEmpty ? title : importedTitle,
+                author: author,
                 remoteBookID: bookID,
                 remoteSourceID: selectedEntry?.id ?? "",
                 chapters: opening.chapters,
+                openingBody: opening.openingBody,
                 context: modelContext
             )
             let listedAuthor = author.trimmingCharacters(in: .whitespacesAndNewlines)

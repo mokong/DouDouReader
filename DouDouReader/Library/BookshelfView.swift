@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 enum ShelfDestination: Hashable {
     case book(UUID)
     case sources
+    case search
 }
 
 enum ShelfSort: String, CaseIterable, Identifiable {
@@ -31,7 +32,6 @@ struct BookshelfView: View {
     @AppStorage("shelf.group") private var groupFilter = "全部"
     @AppStorage("shelf.layout") private var layoutRaw = "grid"
     @State private var path: [ShelfDestination] = []
-    @State private var query = ""
     @State private var importingText = false
     @State private var importingFont = false
     @State private var addingGroup = false
@@ -40,12 +40,6 @@ struct BookshelfView: View {
     @State private var notice: String?
     @State private var pendingDelete: BookRecord?
     @State private var didOpenSample = false
-    @State private var hidingShelfChrome = false
-    @State private var shelfCollapsed = false
-    @State private var showingSearchField = false
-    @State private var titleBlockHeight: CGFloat = 0
-    @State private var searchGeneration = 0
-    @FocusState private var searchFocused: Bool
 
     private var sort: ShelfSort { ShelfSort(rawValue: sortRaw) ?? .recent }
     private var showsGrid: Bool { layoutRaw != "list" }
@@ -57,12 +51,7 @@ struct BookshelfView: View {
 
     private var visibleBooks: [BookRecord] {
         books.filter { book in
-            let groupMatches = groupFilter == "全部" || book.groupName == groupFilter
-            let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            let textMatches = needle.isEmpty
-                || book.title.localizedStandardContains(needle)
-                || book.author.localizedStandardContains(needle)
-            return groupMatches && textMatches
+            groupFilter == "全部" || book.groupName == groupFilter
         }
         .sorted(by: sortBooks)
     }
@@ -76,12 +65,11 @@ struct BookshelfView: View {
     var body: some View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
-                shelfHeader
+                restingHeader
                 groupBar
-                    .shelfFold(faded: hidingShelfChrome, collapsed: shelfCollapsed, shift: -8)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        if let resumeBook, groupFilter == "全部", query.isEmpty {
+                        if let resumeBook, groupFilter == "全部" {
                             continueCard(resumeBook)
                         }
                         if visibleBooks.isEmpty {
@@ -93,15 +81,12 @@ struct BookshelfView: View {
                         }
                     }
                     .padding(16)
-                    .animation(.easeInOut(duration: 0.22), value: query.isEmpty)
                 }
-                .scrollDismissesKeyboard(.interactively)
             }
             .geometryGroup()
             .background(ShelfInk.paper.ignoresSafeArea())
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 restingSearch
-                    .shelfFold(faded: hidingShelfChrome, collapsed: shelfCollapsed, shift: 14)
             }
             .navigationDestination(for: ShelfDestination.self) { destination in
                 switch destination {
@@ -113,6 +98,10 @@ struct BookshelfView: View {
                     }
                 case .sources:
                     SourceBrowserView { id in
+                        path = [.book(id)]
+                    }
+                case .search:
+                    BookSearchView { id in
                         path = [.book(id)]
                     }
                 }
@@ -171,11 +160,19 @@ struct BookshelfView: View {
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 openSources()
             }
+            if ProcessInfo.processInfo.arguments.contains("-openSearch") {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                openSearch()
+            }
         }
         .onAppear {
             LogicChecks.exitIfRequested()
+            try? BookLibrary.collapseOnlineDuplicates(context: modelContext)
             if ProcessInfo.processInfo.arguments.contains("-openSources") {
                 openSources()
+            }
+            if ProcessInfo.processInfo.arguments.contains("-openSearch") {
+                openSearch()
             }
             guard ProcessInfo.processInfo.arguments.contains("-openSample"), !didOpenSample else { return }
             didOpenSample = true
@@ -305,41 +302,6 @@ struct BookshelfView: View {
         ContentUnavailableView("找不到这本书", systemImage: "book.closed", description: Text("它可能刚被移出书架。"))
     }
 
-    private var headerHeight: CGFloat? {
-        if shelfCollapsed { return ShelfMetrics.searchHeader }
-        return titleBlockHeight > 1 ? titleBlockHeight : nil
-    }
-
-    private var shelfHeader: some View {
-        ZStack(alignment: .bottom) {
-            restingHeader
-                .opacity(hidingShelfChrome ? 0 : 1)
-                .offset(y: hidingShelfChrome ? -10 : 0)
-                .allowsHitTesting(!hidingShelfChrome)
-                .accessibilityHidden(hidingShelfChrome)
-                .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: MeasuredHeightKey.self, value: proxy.size.height)
-                    }
-                }
-                .onPreferenceChange(MeasuredHeightKey.self) { value in
-                    // A shorter proposal arrives once the search field takes this slot.
-                    guard !shelfCollapsed, value > titleBlockHeight + 0.5 else { return }
-                    var transaction = Transaction()
-                    transaction.disablesAnimations = true
-                    withTransaction(transaction) { titleBlockHeight = value }
-                }
-
-            searchingHeader
-                .opacity(showingSearchField ? 1 : 0)
-                .offset(y: showingSearchField ? 0 : 8)
-                .allowsHitTesting(showingSearchField)
-                .accessibilityHidden(!showingSearchField)
-        }
-        .frame(height: headerHeight, alignment: .bottom)
-        .clipped()
-    }
-
     private var restingHeader: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -356,44 +318,8 @@ struct BookshelfView: View {
         }
     }
 
-    private var searchingHeader: some View {
-        HStack(spacing: 12) {
-            searchCapsule {
-                TextField(
-                    "",
-                    text: $query,
-                    prompt: Text("搜索书名或作者").foregroundStyle(ShelfInk.secondary)
-                )
-                    .focused($searchFocused)
-                    .textFieldStyle(.plain)
-                    .foregroundStyle(ShelfInk.ink)
-                    .submitLabel(.search)
-                    #if os(iOS) || os(visionOS)
-                    .textInputAutocapitalization(.never)
-                    #endif
-                    .autocorrectionDisabled()
-                if !query.isEmpty {
-                    Button {
-                        query = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(ShelfInk.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("清除")
-                }
-            }
-            Button("取消", action: endSearch)
-                .font(.body)
-                .foregroundStyle(ShelfInk.accent)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, ShelfMetrics.searchHeaderTop)
-        .padding(.bottom, ShelfMetrics.searchHeaderBottom)
-    }
-
     private var restingSearch: some View {
-        Button(action: beginSearch) {
+        Button(action: openSearch) {
             searchCapsule {
                 Text("搜索书名或作者")
                     .foregroundStyle(ShelfInk.secondary)
@@ -402,8 +328,8 @@ struct BookshelfView: View {
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 16)
-        .padding(.top, ShelfMetrics.bottomSearchTop)
-        .padding(.bottom, ShelfMetrics.bottomSearchBottom)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
         .accessibilityLabel("搜索书名或作者")
     }
 
@@ -415,48 +341,10 @@ struct BookshelfView: View {
             label()
         }
         .padding(.horizontal, 16)
-        .frame(height: ShelfMetrics.searchFieldHeight)
+        .frame(height: 48)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(ShelfInk.card, in: Capsule())
         .overlay(Capsule().stroke(ShelfInk.line, lineWidth: 1))
-    }
-
-    private func beginSearch() {
-        guard !shelfCollapsed else { return }
-        searchGeneration += 1
-        let token = searchGeneration
-        withAnimation(ShelfMotion.fade) {
-            hidingShelfChrome = true
-        }
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(90))
-            guard token == searchGeneration else { return }
-            withAnimation(ShelfMotion.layout) {
-                shelfCollapsed = true
-                showingSearchField = true
-            }
-            try? await Task.sleep(for: .milliseconds(420))
-            guard token == searchGeneration, showingSearchField else { return }
-            searchFocused = true
-        }
-    }
-
-    private func endSearch() {
-        searchGeneration += 1
-        let token = searchGeneration
-        searchFocused = false
-        withAnimation(ShelfMotion.fade) {
-            showingSearchField = false
-        }
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(170))
-            guard token == searchGeneration else { return }
-            withAnimation(ShelfMotion.layout) {
-                shelfCollapsed = false
-                hidingShelfChrome = false
-                query = ""
-            }
-        }
     }
 
     private var addMenu: some View {
@@ -576,6 +464,12 @@ struct BookshelfView: View {
         }
     }
 
+    private func openSearch() {
+        if !path.contains(.search) {
+            path.append(.search)
+        }
+    }
+
     private func openSample() {
         do {
             let imported = try BookLibrary.importText(
@@ -635,69 +529,7 @@ struct BookshelfView: View {
     }
 }
 
-private enum ShelfMotion {
-    static let fade = Animation.easeOut(duration: 0.18)
-    static let layout = Animation.smooth(duration: 0.34, extraBounce: 0)
-}
-
-private enum ShelfMetrics {
-    static let searchFieldHeight: CGFloat = 48
-    static let searchHeaderTop: CGFloat = 8
-    static let searchHeaderBottom: CGFloat = 10
-    static let bottomSearchTop: CGFloat = 8
-    static let bottomSearchBottom: CGFloat = 6
-    static var searchHeader: CGFloat { searchFieldHeight + searchHeaderTop + searchHeaderBottom }
-}
-
-private struct MeasuredHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-private struct FoldHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-private struct ShelfFold: ViewModifier {
-    var faded: Bool
-    var collapsed: Bool
-    var shift: CGFloat
-    @State private var measured: CGFloat = 0
-
-    func body(content: Content) -> some View {
-        content
-            .offset(y: faded ? shift : 0)
-            .opacity(faded ? 0 : 1)
-            .background {
-                GeometryReader { proxy in
-                    Color.clear.preference(key: FoldHeightKey.self, value: proxy.size.height)
-                }
-            }
-            .onPreferenceChange(FoldHeightKey.self) { value in
-                guard !collapsed, value > measured + 0.5 else { return }
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) { measured = value }
-            }
-            .frame(height: collapsed ? 0 : (measured > 1 ? measured : nil), alignment: .top)
-            .clipped()
-            .allowsHitTesting(!faded)
-            .accessibilityHidden(faded)
-    }
-}
-
-extension View {
-    fileprivate func shelfFold(faded: Bool, collapsed: Bool, shift: CGFloat) -> some View {
-        modifier(ShelfFold(faded: faded, collapsed: collapsed, shift: shift))
-    }
-}
-
-private enum ShelfInk {
+enum ShelfInk {
     static let paper = Color(red: 0.965, green: 0.945, blue: 0.906)
     static let card = Color(red: 0.995, green: 0.988, blue: 0.972)
     static let chip = Color(red: 0.910, green: 0.870, blue: 0.800)

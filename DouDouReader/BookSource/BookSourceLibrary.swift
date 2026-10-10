@@ -1,6 +1,6 @@
 import Foundation
 
-/// 切换列表里的一条书源。香色闺阁只列出已勾选的源，确定后发现、搜索和正文都用这一条。
+/// 切换列表里的一条书源。发现页只用当前勾选的一条。书架上的搜索会把已启用的源一起查。
 nonisolated struct SwitchableSource: Identifiable, Equatable, Sendable {
     var id: String
     var name: String
@@ -77,7 +77,7 @@ enum BookSourceLibrary {
         return items.first { $0.id == id } ?? items.first
     }
 
-    static func catalog(for item: SwitchableSource) -> BookCatalog {
+    nonisolated static func catalog(for item: SwitchableSource) -> any BookCatalog {
         if item.source.kind == .doudou, let url = SourceURL.parse(item.source.sourceURL) {
             return RemoteBookCatalog(id: item.id, name: item.name, baseURL: url)
         }

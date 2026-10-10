@@ -94,7 +94,13 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         let refs = prepared.chapters.map {
             RemoteChapterRef(title: $0.title, url: $0.url.absoluteString)
         }
-        return OnlineOpening(title: prepared.title, author: prepared.author, text: text, chapters: refs)
+        return OnlineOpening(
+            title: prepared.title,
+            author: prepared.author,
+            text: text,
+            chapters: refs,
+            openingBody: body
+        )
     }
 
     func fetchChapterText(url: String) async throws -> String {
@@ -514,7 +520,50 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         if entries.contains(where: { $0.sort != nil }) {
             entries.sort { ($0.sort ?? Int.max) < ($1.sort ?? Int.max) }
         }
-        return entries.map { ($0.title, $0.url) }
+        let ordered = entries.map { ($0.title, $0.url) }
+        if source.tocRule.startAtFirstChapter {
+            return openingChapterOrder(ordered)
+        }
+        return ordered
+    }
+
+    /// 最新章节横幅通常只有几条，紧跟着才是从第1章排到接近最新章的正文目录。
+    private func openingChapterOrder(_ entries: [(title: String, url: URL)]) -> [(title: String, url: URL)] {
+        guard let index = entries.firstIndex(where: { isOpeningChapter($0.title) }), index <= 40 else {
+            return entries
+        }
+        if index == 0 {
+            return dedupeChapters(entries)
+        }
+        let prefix = entries[..<index]
+        var result = dedupeChapters(Array(entries[index...]))
+        var seen = Set(result.map { $0.url.absoluteString })
+        for item in prefix.reversed() where seen.insert(item.url.absoluteString).inserted {
+            result.append(item)
+        }
+        return result
+    }
+
+    private func dedupeChapters(_ entries: [(title: String, url: URL)]) -> [(title: String, url: URL)] {
+        var seen = Set<String>()
+        var result: [(title: String, url: URL)] = []
+        for entry in entries where seen.insert(entry.url.absoluteString).inserted {
+            result.append(entry)
+        }
+        return result
+    }
+
+    /// 去掉空白和「1.」这类序号后，只认第1章、第一章、第一回、序章、楔子。
+    private func isOpeningChapter(_ title: String) -> Bool {
+        let compact = title.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }
+        var text = String(String.UnicodeScalarView(compact))
+        if let range = text.range(of: #"^\d+[\.、]"#, options: .regularExpression) {
+            text.removeSubrange(range)
+        }
+        return text.range(
+            of: #"^(序章|楔子|前言|引子|第[0０]*[1１一][章节回节])"#,
+            options: .regularExpression
+        ) != nil
     }
 
     /// 目录页里指回书籍详情的链接不是章节。

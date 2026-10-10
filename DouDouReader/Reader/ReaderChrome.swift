@@ -118,7 +118,7 @@ struct SettingsPanel: View {
                     Text("用空格、逗号或换行隔开。包含这些词的段落不会显示。")
                 }
             }
-            .navigationTitle("排版")
+            .navigationTitle("设置")
             #if os(iOS) || os(visionOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -203,25 +203,79 @@ struct ChoiceButtons<Value: Hashable>: View {
     }
 }
 
+/// 目录行。在线书用保存下来的全部章节名；本地书没有远端目录，就用已经拆出来的章节。
+nonisolated enum ReaderCatalog {
+    struct Row: Equatable, Sendable, Identifiable {
+        var index: Int
+        var title: String
+        var isLoaded: Bool
+        var id: Int { index }
+    }
+
+    static func rows(engineTitles: [String], remoteTitles: [String], loadedIndices: Set<Int>) -> [Row] {
+        if remoteTitles.isEmpty {
+            return engineTitles.enumerated().map { index, title in
+                Row(index: index, title: title, isLoaded: true)
+            }
+        }
+        return remoteTitles.enumerated().map { index, raw in
+            let remote = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title: String
+            if !remote.isEmpty {
+                title = remote
+            } else if engineTitles.indices.contains(index), !engineTitles[index].isEmpty {
+                title = engineTitles[index]
+            } else {
+                title = "第\(index + 1)章"
+            }
+            return Row(index: index, title: title, isLoaded: loadedIndices.contains(index))
+        }
+    }
+}
+
 struct CatalogSheet: View {
     var engine: ReaderEngine
+    var remoteTitles: [String]
+    var loadedIndices: Set<Int>
+    var status: String?
+    var errorMessage: String?
     var onJump: (Int) -> Void
+    var onRetry: () -> Void = {}
+    var onSwitchSource: () -> Void = {}
+
+    private var rows: [ReaderCatalog.Row] {
+        ReaderCatalog.rows(
+            engineTitles: engine.chapters.map(\.title),
+            remoteTitles: remoteTitles,
+            loadedIndices: loadedIndices
+        )
+    }
+
+    private var currentMarker: Int? {
+        guard !engine.isTerminal(engine.position),
+              engine.chapters.indices.contains(engine.position.chapterIndex) else { return nil }
+        let chapter = engine.chapters[engine.position.chapterIndex]
+        return remoteTitles.isEmpty ? chapter.index : chapter.remoteIndex
+    }
 
     var body: some View {
         NavigationStack {
-            List(engine.chapters, id: \.index) { chapter in
-                Button {
-                    onJump(chapter.index)
-                } label: {
-                    HStack {
-                        Text(chapter.title)
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        if !engine.isEnd && chapter.index == engine.position.chapterIndex {
-                            Text("当前")
-                                .font(.caption)
-                                .foregroundStyle(Color.accentColor)
+            ScrollViewReader { proxy in
+                List {
+                    if !remoteTitles.isEmpty {
+                        Section {
+                            catalogRows
+                        } header: {
+                            Text("共 \(rows.count) 章，已下载 \(loadedIndices.count) 章")
                         }
+                    } else {
+                        catalogRows
+                    }
+                }
+                .onAppear {
+                    let current = currentMarker ?? 0
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(current, anchor: .center)
                     }
                 }
             }
@@ -229,6 +283,63 @@ struct CatalogSheet: View {
             #if os(iOS) || os(visionOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
+            .safeAreaInset(edge: .bottom) {
+                catalogNotice
+            }
+        }
+    }
+
+    private var catalogRows: some View {
+        ForEach(rows) { row in
+            Button {
+                onJump(row.index)
+            } label: {
+                HStack {
+                    Text(row.title)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    if currentMarker == row.index {
+                        Text("当前")
+                            .font(.caption)
+                            .foregroundStyle(Color.accentColor)
+                    } else if !row.isLoaded {
+                        Text("未下载")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .id(row.index)
+            .disabled(status != nil)
+        }
+    }
+
+    @ViewBuilder
+    private var catalogNotice: some View {
+        if let status {
+            HStack(spacing: 8) {
+                ProgressView()
+                Text(status)
+                    .font(.caption)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(.bar)
+        } else if let errorMessage {
+            VStack(spacing: 8) {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                HStack(spacing: 12) {
+                    Button("重试", action: onRetry)
+                    Button("换源", action: onSwitchSource)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(.bar)
         }
     }
 }
@@ -334,5 +445,50 @@ struct BookmarkSheet: View {
             book.bookmarks.append(mark)
         }
         try? modelContext.save()
+    }
+}
+
+struct CacheSheet: View {
+    var downloaded: Int
+    var total: Int
+    var running: Bool
+    var status: String
+    var canCache: Bool
+    var onStart: () -> Void
+    var onStop: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                if canCache {
+                    Text("已下载 \(downloaded) / \(total) 章")
+                    if !status.isEmpty {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    if running {
+                        Button("停止", action: onStop)
+                    } else {
+                        Button("从本章缓存到结尾", action: onStart)
+                            .buttonStyle(.borderedProminent)
+                    }
+                } else {
+                    Text("这本书已经在本地，不用缓存")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(24)
+            .navigationTitle("缓存")
+            #if os(iOS) || os(visionOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                Button("完成") { dismiss() }
+            }
+        }
     }
 }

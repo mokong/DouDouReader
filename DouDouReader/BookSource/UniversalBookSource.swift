@@ -199,17 +199,43 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
     var nameSelector: String = ""
     /// 章节正文地址选择器
     var urlSelector: String = ""
+    /// 目录最前面是最新章节横幅时，从第一次出现的第1章接着读，并把横幅里多出来的章补到末尾。
+    var startAtFirstChapter: Bool = false
 
     nonisolated init(
         tocURLSelector: String = "",
         listSelector: String = "",
         nameSelector: String = "",
-        urlSelector: String = ""
+        urlSelector: String = "",
+        startAtFirstChapter: Bool = false
     ) {
         self.tocURLSelector = tocURLSelector
         self.listSelector = listSelector
         self.nameSelector = nameSelector
         self.urlSelector = urlSelector
+        self.startAtFirstChapter = startAtFirstChapter
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tocURLSelector, listSelector, nameSelector, urlSelector, startAtFirstChapter
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tocURLSelector = try container.decodeIfPresent(String.self, forKey: .tocURLSelector) ?? ""
+        listSelector = try container.decodeIfPresent(String.self, forKey: .listSelector) ?? ""
+        nameSelector = try container.decodeIfPresent(String.self, forKey: .nameSelector) ?? ""
+        urlSelector = try container.decodeIfPresent(String.self, forKey: .urlSelector) ?? ""
+        startAtFirstChapter = try container.decodeIfPresent(Bool.self, forKey: .startAtFirstChapter) ?? false
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(tocURLSelector, forKey: .tocURLSelector)
+        try container.encode(listSelector, forKey: .listSelector)
+        try container.encode(nameSelector, forKey: .nameSelector)
+        try container.encode(urlSelector, forKey: .urlSelector)
+        try container.encode(startAtFirstChapter, forKey: .startAtFirstChapter)
     }
 }
 

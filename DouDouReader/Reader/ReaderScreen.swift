@@ -13,6 +13,24 @@ struct ReaderScreen: View {
     @State private var engine: ReaderEngine?
     @State private var loadError: String?
     @State private var showCatalog = false
+    @State private var remoteChapterTitles: [String] = []
+    @State private var catalogStatus: String?
+    @State private var catalogError: String?
+    @State private var catalogGeneration = 0
+    @State private var catalogFailedIndex: Int?
+    @State private var readerGeneration = 0
+    @State private var chapterFetchInFlight = false
+    @State private var showSourceSwitch = false
+    @State private var switchChapterTitle = ""
+    @State private var showCache = false
+    @State private var cacheRunning = false
+    @State private var cacheStatus = ""
+    @State private var cacheGeneration = 0
+    @State private var cacheTask: Task<Void, Never>?
+    @State private var chapterScrub = 0.0
+    @State private var scrubbingChapter = false
+    @State private var chapterMoveError: String?
+    @State private var chapterMoveGeneration = 0
     @State private var showSearch = false
     @State private var showBookmarks = false
     @State private var showSettings = false
@@ -30,7 +48,11 @@ struct ReaderScreen: View {
             }
         }
         .task { openBook() }
-        .onDisappear { engine?.stopActivities() }
+        .onDisappear {
+            engine?.stopActivities()
+            cacheGeneration += 1
+            cacheTask?.cancel()
+        }
     }
 
     @ViewBuilder
@@ -57,6 +79,12 @@ struct ReaderScreen: View {
                 Color.black.opacity(1 - settings.brightness)
                     .allowsHitTesting(false)
             }
+            .overlay {
+                if engine.isChapterLoadFailed {
+                    chapterFailureActions(engine, theme: theme)
+                        .offset(y: 44)
+                }
+            }
             .overlay(alignment: .top) {
                 if engine.showsChrome {
                     topBar(engine, theme: theme)
@@ -65,8 +93,9 @@ struct ReaderScreen: View {
             }
             .overlay(alignment: .bottom) {
                 if engine.showsChrome {
-                    bottomBar(engine, theme: theme)
+                    bottomPanel(engine, theme: theme)
                         .padding(.bottom, safeBottom)
+                        .background(theme.background.color)
                 }
             }
             #if os(iOS) || os(visionOS)
@@ -91,10 +120,33 @@ struct ReaderScreen: View {
         .onChange(of: deviceColorScheme) { _, _ in sync(engine) }
         .onChange(of: settings.keepScreenOn) { _, _ in updateIdleTimer() }
         .sheet(isPresented: $showCatalog) {
-            CatalogSheet(engine: engine) { index in
-                engine.jump(to: index)
-                showCatalog = false
-                engine.showsChrome = false
+            CatalogSheet(
+                engine: engine,
+                remoteTitles: remoteChapterTitles,
+                loadedIndices: Set(engine.chapters.map(\.remoteIndex)),
+                status: catalogStatus,
+                errorMessage: catalogError,
+                onJump: { index in
+                    selectCatalogChapter(index, engine: engine)
+                },
+                onRetry: {
+                    guard let index = catalogFailedIndex else { return }
+                    selectCatalogChapter(index, engine: engine)
+                },
+                onSwitchSource: {
+                    let title = catalogFailedIndex.flatMap { remoteChapterTitles.indices.contains($0) ? remoteChapterTitles[$0] : nil } ?? ""
+                    showCatalog = false
+                    presentSourceSwitch(preferring: title)
+                }
+            )
+        }
+        .onChange(of: showCatalog) { _, shown in
+            if shown {
+                catalogError = nil
+                catalogStatus = nil
+                catalogFailedIndex = nil
+            } else {
+                catalogGeneration += 1
             }
         }
         .sheet(isPresented: $showSearch) {
@@ -114,6 +166,28 @@ struct ReaderScreen: View {
         .sheet(isPresented: $showSettings) {
             SettingsPanel(settings: settings)
         }
+        .sheet(isPresented: $showCache) {
+            CacheSheet(
+                downloaded: engine.chapters.count,
+                total: max(engine.remoteChapterCount, engine.chapters.count),
+                running: cacheRunning,
+                status: cacheStatus,
+                canCache: engine.remoteChapterCount > 0,
+                onStart: { startCache(engine) },
+                onStop: { stopCache() }
+            )
+        }
+        .sheet(isPresented: $showSourceSwitch) {
+            SourceSwitchSheet(
+                bookTitle: book.title,
+                author: book.author,
+                currentSourceID: book.remoteSourceID,
+                currentBookID: book.remoteBookID,
+                onSelect: { source, hit in
+                    await switchSource(to: source, hit: hit)
+                }
+            )
+        }
         #if os(iOS)
         .onAppear { updateIdleTimer() }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
@@ -122,6 +196,7 @@ struct ReaderScreen: View {
 
     @ViewBuilder
     private func pageBody(_ engine: ReaderEngine, theme: ReadingTheme, safeTop: CGFloat, safeBottom: CGFloat) -> some View {
+        let _ = engine.layoutRevision
         #if os(iOS) || os(visionOS)
         ReaderContainer(engine: engine, settings: settings, theme: theme, safeTop: safeTop, safeBottom: safeBottom)
         #else
@@ -180,7 +255,7 @@ struct ReaderScreen: View {
     }
 
     private func topBar(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Button {
                 dismiss()
             } label: {
@@ -188,54 +263,297 @@ struct ReaderScreen: View {
                     .frame(width: 36, height: 36)
             }
             .accessibilityLabel("返回")
-            Text(book.title)
-                .font(.headline)
-                .lineLimit(1)
-            Spacer()
-            Text(engine.currentTitle)
-                .font(.caption)
-                .lineLimit(1)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(book.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                if !engine.currentTitle.isEmpty {
+                    Text(engine.currentTitle)
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 8)
+            listenMenu(engine)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
+        .background(theme.background.color)
         .foregroundStyle(theme.text.color)
     }
 
-    private func bottomBar(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
-        HStack(spacing: 0) {
-            barButton("目录", systemImage: "list.bullet") { showCatalog = true }
-            barButton("搜索", systemImage: "magnifyingglass") { showSearch = true }
-            barButton("书签", systemImage: "bookmark") { showBookmarks = true }
-            barButton(engine.speech.isActive ? "停止" : "朗读", systemImage: engine.speech.isActive ? "speaker.slash" : "speaker.wave.2") {
-                engine.toggleSpeech()
+    private func bottomPanel(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "sun.min")
+                    .font(.caption)
+                    .foregroundStyle(theme.secondary.color)
+                Slider(value: brightnessBinding, in: 0.45...1)
+                    .tint(theme.text.color)
+                Image(systemName: "sun.max")
+                    .font(.caption)
+                    .foregroundStyle(theme.secondary.color)
             }
-            if engine.speech.isActive {
-                barButton(engine.speech.isPaused ? "继续" : "暂停", systemImage: engine.speech.isPaused ? "play" : "pause") {
-                    engine.speech.togglePause()
+            chapterScrubber(engine, theme: theme)
+            HStack(spacing: 0) {
+                barButton("目录", systemImage: "list.bullet") { showCatalog = true }
+                barButton("夜间", systemImage: settings.themeID == "night" ? "moon.fill" : "moon") {
+                    toggleNight()
+                }
+                barButton("设置", systemImage: "slider.horizontal.3") { showSettings = true }
+                barButton("缓存", systemImage: "arrow.down.circle") { showCache = true }
+                moreMenu(engine)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 4)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(theme.secondary.color.opacity(0.25))
+                .frame(height: 0.5)
+        }
+        .foregroundStyle(theme.text.color)
+        .onAppear {
+            if !scrubbingChapter {
+                chapterScrub = Double(scrubIndex(engine))
+            }
+        }
+        .onChange(of: engine.position) { _, _ in
+            guard !scrubbingChapter else { return }
+            chapterScrub = Double(scrubIndex(engine))
+        }
+    }
+
+    private func chapterScrubber(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
+        let count = scrubCount(engine)
+        let index = scrubbingChapter ? Int(chapterScrub.rounded()) : scrubIndex(engine)
+        return VStack(spacing: 4) {
+            Text(chapterTitle(at: index, engine: engine))
+                .font(.caption)
+                .lineLimit(1)
+            HStack(spacing: 8) {
+                Button("上一章") { stepChapter(-1, engine: engine) }
+                    .disabled(index <= 0)
+                Slider(
+                    value: Binding(
+                        get: { scrubbingChapter ? chapterScrub : Double(scrubIndex(engine)) },
+                        set: { chapterScrub = $0 }
+                    ),
+                    in: 0...Double(max(count - 1, 1)),
+                    step: 1
+                ) { editing in
+                    scrubbingChapter = editing
+                    if !editing {
+                        moveToChapter(Int(chapterScrub.rounded()), engine: engine)
+                    }
+                }
+                .tint(theme.text.color)
+                .disabled(count < 2)
+                Button("下一章") { stepChapter(1, engine: engine) }
+                    .disabled(index >= count - 1)
+            }
+            .font(.subheadline)
+            .buttonStyle(.plain)
+            if let chapterMoveError {
+                Text(chapterMoveError)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func moreMenu(_ engine: ReaderEngine) -> some View {
+        Menu {
+            Button("搜索") { showSearch = true }
+            Button("书签") { showBookmarks = true }
+            if canSwitchSource {
+                Button("换源") {
+                    presentSourceSwitch(preferring: engine.currentChapter?.title ?? book.currentChapterTitle)
                 }
             }
-            barButton(engine.isAutoReading ? "停止翻" : "自动", systemImage: "timer") {
+            Button(engine.isAutoReading ? "停止自动翻页" : "自动翻页") {
                 if engine.isAutoReading {
                     engine.stopAuto()
                 } else {
                     engine.startAuto()
                 }
             }
-            barButton("排版", systemImage: "textformat.size") { showSettings = true }
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: "ellipsis")
+                Text("更多")
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 46)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial)
-        .foregroundStyle(theme.text.color)
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel("更多")
+    }
+
+    private func listenMenu(_ engine: ReaderEngine) -> some View {
+        Menu {
+            if engine.speech.isActive {
+                Button(engine.speech.isPaused ? "继续朗读" : "暂停朗读") {
+                    engine.speech.togglePause()
+                }
+                Button("停止朗读") {
+                    engine.toggleSpeech()
+                }
+            } else {
+                Button("朗读") {
+                    engine.toggleSpeech()
+                }
+            }
+        } label: {
+            Image(systemName: listenSymbol(engine))
+                .frame(width: 36, height: 36)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(listenTitle(engine))
+    }
+
+    private func listenTitle(_ engine: ReaderEngine) -> String {
+        if engine.speech.isActive { return engine.speech.isPaused ? "已暂停" : "朗读中" }
+        if engine.isAutoReading { return "翻页中" }
+        return "听书"
+    }
+
+    private func listenSymbol(_ engine: ReaderEngine) -> String {
+        if engine.speech.isActive { return engine.speech.isPaused ? "speaker.slash" : "headphones" }
+        if engine.isAutoReading { return "timer" }
+        return "headphones"
+    }
+
+    private var brightnessBinding: Binding<Double> {
+        Binding(
+            get: { settings.brightness },
+            set: { settings.brightness = $0 }
+        )
+    }
+
+    private func toggleNight() {
+        if settings.themeID == "night" {
+            settings.themeID = settings.dayThemeID == "night" ? "paper" : settings.dayThemeID
+        } else {
+            settings.dayThemeID = settings.themeID
+            settings.themeID = "night"
+        }
+    }
+
+    private func scrubCount(_ engine: ReaderEngine) -> Int {
+        engine.remoteChapterCount > 0 ? engine.remoteChapterCount : engine.chapters.count
+    }
+
+    private func scrubIndex(_ engine: ReaderEngine) -> Int {
+        if engine.remoteChapterCount > 0 {
+            return engine.currentChapter?.remoteIndex ?? 0
+        }
+        if engine.isEnd { return max(engine.chapters.count - 1, 0) }
+        return engine.position.chapterIndex
+    }
+
+    private func chapterTitle(at index: Int, engine: ReaderEngine) -> String {
+        if remoteChapterTitles.indices.contains(index) {
+            let title = remoteChapterTitles[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty { return title }
+        }
+        if engine.remoteChapterCount == 0, engine.chapters.indices.contains(index) {
+            return engine.chapters[index].title
+        }
+        if let slice = engine.chapters.first(where: { $0.remoteIndex == index }) {
+            return slice.title
+        }
+        return "第 \(index + 1) 章"
+    }
+
+    private func stepChapter(_ delta: Int, engine: ReaderEngine) {
+        let count = scrubCount(engine)
+        guard count > 0 else { return }
+        let next = min(max(scrubIndex(engine) + delta, 0), count - 1)
+        chapterScrub = Double(next)
+        moveToChapter(next, engine: engine)
+    }
+
+    /// 滑块和上一章/下一章停在选中的章节，菜单保持打开。
+    private func moveToChapter(_ index: Int, engine: ReaderEngine) {
+        let count = scrubCount(engine)
+        guard count > 0 else { return }
+        let target = min(max(index, 0), count - 1)
+        chapterMoveGeneration += 1
+        let ticket = chapterMoveGeneration
+        chapterMoveError = nil
+        if engine.remoteChapterCount == 0 {
+            engine.jump(to: target)
+            return
+        }
+        if engine.chapters.contains(where: { $0.remoteIndex == target }) {
+            engine.jumpToRemote(target)
+            return
+        }
+        Task {
+            let ok = await loadRemoteChapter(target, into: engine, jumpAfter: true)
+            guard ticket == chapterMoveGeneration else { return }
+            chapterMoveError = ok ? nil : "这一章没有加载出来"
+        }
+    }
+
+    private func startCache(_ engine: ReaderEngine) {
+        guard engine.remoteChapterCount > 0, !cacheRunning else { return }
+        cacheGeneration += 1
+        let generation = cacheGeneration
+        cacheRunning = true
+        cacheStatus = ""
+        let start = scrubIndex(engine)
+        cacheTask = Task { @MainActor in
+            let total = engine.remoteChapterCount
+            for index in start..<total {
+                if Task.isCancelled || generation != cacheGeneration { return }
+                if engine.chapters.contains(where: { $0.remoteIndex == index }) { continue }
+                cacheStatus = "正在缓存 \(self.chapterTitle(at: index, engine: engine))"
+                let ok = await self.loadRemoteChapter(
+                    index,
+                    into: engine,
+                    jumpAfter: false,
+                    generation: nil,
+                    reportFailure: false
+                )
+                if Task.isCancelled || generation != cacheGeneration { return }
+                if !ok {
+                    self.cacheStatus = "缓存中断"
+                    self.cacheRunning = false
+                    return
+                }
+            }
+            guard generation == cacheGeneration else { return }
+            self.cacheRunning = false
+            self.cacheStatus = "已缓存到结尾"
+        }
+    }
+
+    private func stopCache() {
+        let wasRunning = cacheRunning
+        cacheGeneration += 1
+        cacheTask?.cancel()
+        cacheTask = nil
+        cacheRunning = false
+        if wasRunning {
+            cacheStatus = "缓存中断"
+        }
     }
 
     private func barButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 3) {
                 Image(systemName: systemImage)
-                Text(title).font(.caption2)
+                Text(title)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .frame(maxWidth: .infinity)
             .frame(height: 46)
@@ -269,7 +587,41 @@ struct ReaderScreen: View {
                 try? modelContext.save()
             }
             let remoteChapters = RemoteChapterList.decode(book.remoteChapterList)
-            created.hasUnloadedChapters = book.loadedChapterCount < remoteChapters.count
+            remoteChapterTitles = remoteChapters.map(\.title)
+            if !remoteChapters.isEmpty {
+                let saved = StoredChapters.load(fileName: book.fileName)
+                let items = storedChapters(from: text, remoteCount: remoteChapters.count)
+                var start = book.utf16Offset
+                if saved.isEmpty, !items.isEmpty {
+                    let index = items.contains(where: { $0.index == book.chapterIndex }) ? book.chapterIndex : items[0].index
+                    start = StoredChapters.offset(of: index, in: items)
+                    book.utf16Offset = start
+                    let assembled = StoredChapters.assemble(items)
+                    try? BookStorage.overwrite(fileName: book.fileName, text: assembled)
+                    book.totalUTF16 = (assembled as NSString).length
+                    book.contentHash = BookLibrary.hash(assembled)
+                    try? modelContext.save()
+                }
+                let rebuilt = ReaderEngine(
+                    stored: items,
+                    remoteCount: remoteChapters.count,
+                    fallbackTitle: book.title,
+                    startOffset: start,
+                    settings: settings
+                )
+                rebuilt.onProgress = created.onProgress
+                rebuilt.onNeedRemoteChapter = { [weak rebuilt] index in
+                    guard let rebuilt else { return }
+                    Task { @MainActor in
+                        await self.loadRemoteChapter(index, into: rebuilt, jumpAfter: false)
+                    }
+                }
+                rebuilt.applySettings(settings, interfaceDark: deviceColorScheme == .dark)
+                engine = rebuilt
+                updateIdleTimer()
+                return
+            }
+            created.hasUnloadedChapters = false
             created.onNeedNextChapter = { [weak created] in
                 guard let created else { return }
                 Task { @MainActor in
@@ -284,12 +636,104 @@ struct ReaderScreen: View {
         }
     }
 
-    private func loadNextChapter(into engine: ReaderEngine) async {
-        let chapters = RemoteChapterList.decode(book.remoteChapterList)
-        let index = book.loadedChapterCount
-        guard chapters.indices.contains(index) else {
-            engine.hasUnloadedChapters = false
+    private func storedChapters(from text: String, remoteCount: Int) -> [StoredChapter] {
+        let saved = StoredChapters.load(fileName: book.fileName)
+        if !saved.isEmpty { return saved }
+        var migrated = StoredChapters.migrated(from: text, fallbackTitle: book.title)
+        if remoteCount > 0 {
+            migrated = migrated.filter { $0.index < remoteCount }
+        }
+        if !migrated.isEmpty {
+            try? StoredChapters.save(fileName: book.fileName, chapters: migrated)
+            book.loadedChapterCount = migrated.count
+        }
+        return migrated
+    }
+
+    private func selectCatalogChapter(_ index: Int, engine: ReaderEngine) {
+        catalogGeneration += 1
+        let generation = catalogGeneration
+        let remote = RemoteChapterList.decode(book.remoteChapterList)
+        if remote.isEmpty {
+            engine.jump(to: index)
+            showCatalog = false
+            engine.showsChrome = false
+            catalogStatus = nil
             return
+        }
+        if engine.chapters.contains(where: { $0.remoteIndex == index }) {
+            engine.jumpToRemote(index)
+            showCatalog = false
+            engine.showsChrome = false
+            catalogStatus = nil
+            return
+        }
+        catalogError = nil
+        catalogFailedIndex = index
+        Task {
+            let ok = await loadRemoteChapter(index, into: engine, jumpAfter: true, generation: generation)
+            guard generation == catalogGeneration, !Task.isCancelled else { return }
+            catalogStatus = nil
+            if ok {
+                catalogFailedIndex = nil
+                showCatalog = false
+                engine.showsChrome = false
+            } else if catalogError == nil {
+                catalogError = "这一章加载失败"
+            }
+        }
+    }
+
+    private func loadNextChapter(into engine: ReaderEngine) async {
+        _ = await loadRemoteChapter(book.loadedChapterCount, into: engine, jumpAfter: false, generation: nil)
+    }
+
+    /// 只下载目录里的这一章。目录跳转和章节交界共用，避免同时抓同一章。
+    /// reportFailure 为 false 时只给缓存用：失败不把当前页标成加载失败，也不写目录错误。
+    private func loadRemoteChapter(
+        _ index: Int,
+        into engine: ReaderEngine,
+        jumpAfter: Bool,
+        generation: Int? = nil,
+        reportFailure: Bool = true
+    ) async -> Bool {
+        let ticket = readerGeneration
+        if engine.chapters.contains(where: { $0.remoteIndex == index }) {
+            if jumpAfter { engine.jumpToRemote(index) }
+            return true
+        }
+        while chapterFetchInFlight {
+            if Task.isCancelled { return false }
+            if readerGeneration != ticket {
+                if reportFailure { engine.noteNextChapterFailed() }
+                return false
+            }
+            if let generation, generation != catalogGeneration { return false }
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+        if engine.chapters.contains(where: { $0.remoteIndex == index }) {
+            if jumpAfter { engine.jumpToRemote(index) }
+            return true
+        }
+        chapterFetchInFlight = true
+        defer { chapterFetchInFlight = false }
+        if readerGeneration != ticket {
+            if reportFailure { engine.noteNextChapterFailed() }
+            return false
+        }
+        if Task.isCancelled { return false }
+        if let generation, generation != catalogGeneration { return false }
+        let chapters = RemoteChapterList.decode(book.remoteChapterList)
+        guard chapters.indices.contains(index) else {
+            guard reportFailure else { return false }
+            if generation != nil { catalogError = "后面没有更多章节" }
+            engine.noteNextChapterFailed()
+            return false
+        }
+        if generation != nil {
+            let rawTitle = chapters[index].title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = rawTitle.isEmpty ? "第 \(index + 1) 章" : rawTitle
+            catalogStatus = "正在加载\(name)"
         }
         do {
             let records = (try? modelContext.fetch(FetchDescriptor<SourceRecord>())) ?? []
@@ -298,18 +742,136 @@ struct ReaderScreen: View {
                 throw SourceError.unreachable
             }
             let body = try await catalog.fetchChapterText(url: chapters[index].url)
-            guard engine.appendLoadedChapter(title: chapters[index].title, body: body) else {
+            if Task.isCancelled { return false }
+            guard readerGeneration == ticket else {
+                if reportFailure { engine.noteNextChapterFailed() }
+                return false
+            }
+            let title = chapters[index].title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard engine.insertRemoteChapter(remoteIndex: index, title: title.isEmpty ? "第\(index + 1)章" : title, body: body) else {
                 throw SourceError.emptyBook
             }
+            var stored = StoredChapters.load(fileName: book.fileName)
+            stored.removeAll { $0.index == index }
+            stored.append(StoredChapter(index: index, title: title.isEmpty ? "第\(index + 1)章" : title, body: body))
+            try StoredChapters.save(fileName: book.fileName, chapters: stored)
             try BookStorage.overwrite(fileName: book.fileName, text: engine.source)
-            book.loadedChapterCount += 1
+            book.loadedChapterCount = stored.count
             book.totalUTF16 = engine.totalUTF16
             book.contentHash = BookLibrary.hash(engine.source)
-            engine.hasUnloadedChapters = book.loadedChapterCount < chapters.count
             try? modelContext.save()
+            if jumpAfter, generation == nil || generation == catalogGeneration {
+                engine.jumpToRemote(index)
+            }
+            return true
         } catch {
+            guard reportFailure else { return false }
             engine.noteNextChapterFailed()
+            if generation != nil {
+                let message = (error as? LocalizedError)?.errorDescription ?? ""
+                catalogError = message.isEmpty ? "这一章加载失败" : message
+            }
+            return false
         }
+    }
+
+    private var canSwitchSource: Bool {
+        !book.remoteBookID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func presentSourceSwitch(preferring title: String) {
+        switchChapterTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        showSourceSwitch = true
+    }
+
+    private func chapterFailureActions(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
+        HStack(spacing: 16) {
+            Button("重试") {
+                engine.retryCurrentChapter()
+            }
+            if canSwitchSource {
+                Button("换源") {
+                    presentSourceSwitch(preferring: failedChapterTitle(engine))
+                }
+            }
+        }
+        .buttonStyle(.bordered)
+        .tint(theme.text.color)
+    }
+
+    private func failedChapterTitle(_ engine: ReaderEngine) -> String {
+        if let remote = engine.position.boundaryRemote {
+            let chapters = RemoteChapterList.decode(book.remoteChapterList)
+            if chapters.indices.contains(remote) {
+                let title = chapters[remote].title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !title.isEmpty { return title }
+            }
+        }
+        let current = engine.currentChapter?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return current.isEmpty ? book.currentChapterTitle : current
+    }
+
+    private func switchSource(to source: SwitchableSource, hit: CatalogBook) async -> String? {
+        guard let catalog = BookSourceLibrary.catalog(for: source) as? IncrementalBookCatalog else {
+            return "这个书源不能按章阅读"
+        }
+        let wanted = switchChapterTitle
+        do {
+            let opening = try await catalog.fetchOpening(bookID: hit.id)
+            readerGeneration += 1
+            if !wanted.isEmpty {
+                book.currentChapterTitle = wanted
+            }
+            let listedAuthor = hit.author.trimmingCharacters(in: .whitespacesAndNewlines)
+            let author = book.author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? listedAuthor : book.author
+            _ = try BookLibrary.importOnline(
+                text: opening.text,
+                suggestedTitle: book.title,
+                author: author,
+                remoteBookID: hit.id,
+                remoteSourceID: source.id,
+                chapters: opening.chapters,
+                openingBody: opening.openingBody,
+                context: modelContext
+            )
+            reloadReader()
+            guard let engine else {
+                showSourceSwitch = false
+                return nil
+            }
+            if await land(on: wanted, engine: engine) {
+                showSourceSwitch = false
+                showCatalog = false
+                engine.showsChrome = false
+                return nil
+            }
+            return "已经换到这个书源，但这一章没有加载出来"
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? ""
+            return message.isEmpty ? "换源失败" : message
+        }
+    }
+
+    private func reloadReader() {
+        stopCache()
+        engine?.stopActivities()
+        engine = nil
+        openBook()
+    }
+
+    /// 换源后尽量停在原来要读的那一章。目录里没有同名章节时，留在已经对上的进度。
+    private func land(on title: String, engine: ReaderEngine) async -> Bool {
+        let wanted = BookIdentity.normalize(title)
+        guard !wanted.isEmpty else { return true }
+        let chapters = RemoteChapterList.decode(book.remoteChapterList)
+        guard let index = chapters.firstIndex(where: { BookIdentity.normalize($0.title) == wanted }) else {
+            return true
+        }
+        if engine.chapters.contains(where: { $0.remoteIndex == index }) {
+            engine.jumpToRemote(index)
+            return true
+        }
+        return await loadRemoteChapter(index, into: engine, jumpAfter: true)
     }
 
     private func sync(_ engine: ReaderEngine) {
@@ -442,12 +1004,15 @@ struct MacPageView: View {
 
     @ViewBuilder
     private func page(_ engine: ReaderEngine) -> some View {
-        if engine.isEnd {
+        if engine.isTerminal(engine.position) {
             VStack(spacing: 8) {
-                Text(engine.endTitle)
+                Text(engine.terminalTitle(for: engine.position))
                     .font(.title2.bold())
-                Text(engine.endDetail)
-                    .foregroundStyle(theme.secondary.color)
+                let detail = engine.terminalDetail(for: engine.position)
+                if !detail.isEmpty {
+                    Text(detail)
+                        .foregroundStyle(theme.secondary.color)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .foregroundStyle(theme.text.color)

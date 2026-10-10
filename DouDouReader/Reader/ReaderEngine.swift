@@ -5,6 +5,8 @@ import Observation
 struct ReaderPosition: Equatable {
     var chapterIndex: Int
     var pageIndex: Int
+    /// 停在章节交界、等待这一章下载时使用。空表示正在读正文。
+    var boundaryRemote: Int? = nil
 }
 
 struct SearchHit: Identifiable, Equatable {
@@ -23,7 +25,10 @@ final class ReaderEngine {
     let speech = SpeechController()
     let settings: ReaderSettingsStore
     var hasUnloadedChapters = false
+    /// 在线目录总章数。0 表示本地整本，章节是连续的。
+    var remoteChapterCount = 0
     @ObservationIgnored var onNeedNextChapter: (() -> Void)?
+    @ObservationIgnored var onNeedRemoteChapter: ((Int) -> Void)?
     @ObservationIgnored private var askedForNext = false
     @ObservationIgnored private var nextChapterFailed = false
     @ObservationIgnored private var failedAt: ReaderPosition?
@@ -31,7 +36,7 @@ final class ReaderEngine {
     private(set) var position = ReaderPosition(chapterIndex: 0, pageIndex: 0)
     @ObservationIgnored private(set) var anchorOffset: Int
     @ObservationIgnored private(set) var pageSize: CGSize = .zero
-    @ObservationIgnored private(set) var layoutRevision = 0
+    private(set) var layoutRevision = 0
     private(set) var highlightRange: NSRange?
     private(set) var autoRunning = false
     @ObservationIgnored var animateNextTurn = false
@@ -69,9 +74,74 @@ final class ReaderEngine {
         }
     }
 
+    /// 在线书按已下载的章节建正文。remoteIndex 可以不连续。
+    init(
+        stored items: [StoredChapter],
+        remoteCount: Int,
+        fallbackTitle: String,
+        startOffset: Int,
+        settings: ReaderSettingsStore
+    ) {
+        let built = StoredChapters.layout(items)
+        let text: String
+        if built.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            text = fallbackTitle
+            chapters = ChapterSplitter.split(fallbackTitle, fallbackTitle: fallbackTitle)
+        } else {
+            text = built.text
+            chapters = built.slices
+        }
+        source = text
+        remoteChapterCount = remoteCount
+        let total = (text as NSString).length
+        anchorOffset = min(max(0, startOffset), total)
+        self.settings = settings
+        appliedLayout = settings.layoutSnapshot(interfaceDark: false)
+        speech.onAdvance = { [weak self] step in
+            self?.handleSpeechAdvance(step)
+        }
+        speech.onRange = { [weak self] range in
+            self?.handleSpeechRange(range)
+        }
+    }
+
     var totalUTF16: Int { (source as NSString).length }
 
-    var isEnd: Bool { position.chapterIndex >= chapters.count }
+    var isEnd: Bool { position.chapterIndex >= chapters.count && position.boundaryRemote == nil }
+
+    func isTerminal(_ position: ReaderPosition) -> Bool {
+        position.boundaryRemote != nil || position.chapterIndex >= chapters.count
+    }
+
+    func terminalTitle(for position: ReaderPosition) -> String {
+        if position.boundaryRemote != nil {
+            if nextChapterFailed { return boundaryIsPrevious(position) ? "上一章加载失败" : "下一章加载失败" }
+            return boundaryIsPrevious(position) ? "正在加载上一章" : "正在加载下一章"
+        }
+        return endTitle
+    }
+
+    func terminalDetail(for position: ReaderPosition) -> String {
+        if position.boundaryRemote != nil {
+            return nextChapterFailed ? "" : "请稍等"
+        }
+        return endDetail
+    }
+
+    var isChapterLoadFailed: Bool {
+        nextChapterFailed && position.boundaryRemote != nil
+    }
+
+    /// 章节交界加载失败后，再要这一章。
+    func retryCurrentChapter() {
+        guard isChapterLoadFailed else { return }
+        retryBoundary()
+    }
+
+    func jumpToRemote(_ remoteIndex: Int) {
+        guard let index = chapters.firstIndex(where: { $0.remoteIndex == remoteIndex }) else { return }
+        jump(to: index)
+    }
 
     var isAutoReading: Bool { autoRunning }
 
@@ -96,6 +166,7 @@ final class ReaderEngine {
     }
 
     var pageLabel: String {
+        if position.boundaryRemote != nil { return "—" }
         if isEnd { return "完" }
         let count = layout(for: position.chapterIndex)?.pageCount ?? 1
         return "\(position.pageIndex + 1) / \(count)"
@@ -158,17 +229,23 @@ final class ReaderEngine {
         if delta > 0 {
             if let next = neighbor(after: position) {
                 target = next
+            } else if position.boundaryRemote != nil {
+                if nextChapterFailed { retryBoundary() }
+                return
             } else if position.chapterIndex < chapters.count {
                 target = ReaderPosition(chapterIndex: chapters.count, pageIndex: 0)
             } else {
                 return
             }
         } else {
-            guard let previous = neighbor(before: position) else { return }
+            guard let previous = neighbor(before: position) else {
+                if position.boundaryRemote != nil, nextChapterFailed { retryBoundary() }
+                return
+            }
             target = previous
         }
         move(to: target, animated: true)
-        if target.chapterIndex >= chapters.count {
+        if isTerminal(target) {
             haltSpeech()
             stopAuto()
             return
@@ -184,7 +261,7 @@ final class ReaderEngine {
         guard newPosition != position else { return }
         position = newPosition
         commit()
-        if isEnd {
+        if isTerminal(position) {
             haltSpeech()
             stopAuto()
             return
@@ -238,7 +315,7 @@ final class ReaderEngine {
             return
         }
         stopAuto()
-        guard !isEnd else { return }
+        guard !isTerminal(position) else { return }
         if settings.speechMode == .page {
             speakCurrentPage()
         } else {
@@ -257,12 +334,12 @@ final class ReaderEngine {
                 let nanoseconds = UInt64(max(1, self.settings.autoInterval) * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: nanoseconds)
                 guard !Task.isCancelled, self.autoRunning else { return }
-                if self.isEnd {
+                if self.isTerminal(self.position) {
                     self.stopAuto()
                     return
                 }
                 self.go(delta: 1)
-                if self.isEnd {
+                if self.isTerminal(self.position) {
                     self.stopAuto()
                     return
                 }
@@ -318,11 +395,86 @@ final class ReaderEngine {
         return true
     }
 
+    /// 只插入这一章，不补它前面或后面的空档。人正等在这一章的交界上时，才翻进去。
+    func insertRemoteChapter(remoteIndex target: Int, title: String, body: String) -> Bool {
+        let cleaned = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return false }
+        if chapters.contains(where: { $0.remoteIndex == target }) { return true }
+        let piece = StoredChapters.block(title: title, body: cleaned)
+        let pieceLength = (piece as NSString).length
+        guard source.utf8.count + piece.utf8.count <= BookStorage.byteLimit else { return false }
+        let insertAt = chapters.firstIndex { $0.remoteIndex > target } ?? chapters.count
+        let oldCount = chapters.count
+        let oldPosition = position
+        let waiting = oldPosition.boundaryRemote == target
+        let originRemote = remoteIndex(at: oldPosition.chapterIndex)
+        let insertOffset: Int
+        if chapters.isEmpty || insertAt == 0 {
+            source = piece + source
+            insertOffset = 0
+        } else if insertAt == chapters.count {
+            let gap = source.hasSuffix("\n") || source.isEmpty ? "" : "\n"
+            insertOffset = (source as NSString).length + (gap as NSString).length
+            source += gap + piece
+        } else {
+            insertOffset = chapters[insertAt].lineStart
+            let ns = source as NSString
+            source = ns.substring(to: insertOffset) + piece + ns.substring(from: insertOffset)
+        }
+        if insertAt > 0, chapters.indices.contains(insertAt - 1) {
+            chapters[insertAt - 1].bodyEnd = insertOffset
+        }
+        if insertAt < chapters.count {
+            for index in insertAt..<chapters.count {
+                chapters[index].lineStart += pieceLength
+                chapters[index].bodyStart += pieceLength
+                chapters[index].bodyEnd += pieceLength
+            }
+        }
+        let titleLength = (title as NSString).length
+        let end = insertOffset + pieceLength
+        chapters.insert(
+            ChapterSlice(
+                index: insertAt,
+                title: title,
+                lineStart: insertOffset,
+                bodyStart: min(insertOffset + titleLength + 1, end),
+                bodyEnd: end,
+                remoteIndex: target
+            ),
+            at: insertAt
+        )
+        for index in chapters.indices {
+            chapters[index].index = index
+        }
+        cache.removeAll()
+        layoutRevision += 1
+        askedForNext = false
+        nextChapterFailed = false
+        failedAt = nil
+        if waiting {
+            animateNextTurn = true
+            let forward = originRemote.map { target > $0 } ?? true
+            if forward {
+                position = ReaderPosition(chapterIndex: insertAt, pageIndex: 0)
+            } else {
+                let pages = layout(for: insertAt)?.pageCount ?? 1
+                position = ReaderPosition(chapterIndex: insertAt, pageIndex: max(pages - 1, 0))
+            }
+        } else if oldPosition.chapterIndex >= oldCount {
+            position = ReaderPosition(chapterIndex: chapters.count, pageIndex: 0)
+        } else if insertAt <= oldPosition.chapterIndex {
+            position = ReaderPosition(chapterIndex: oldPosition.chapterIndex + 1, pageIndex: oldPosition.pageIndex)
+        }
+        commit()
+        return true
+    }
+
     func noteNextChapterFailed() {
         askedForNext = false
         nextChapterFailed = true
         failedAt = position
-        if isEnd {
+        if isEnd || position.boundaryRemote != nil {
             layoutRevision += 1
         }
     }
@@ -416,6 +568,11 @@ final class ReaderEngine {
     }
 
     func currentUTF16() -> Int {
+        if let remote = position.boundaryRemote,
+           chapters.indices.contains(position.chapterIndex) {
+            let chapter = chapters[position.chapterIndex]
+            return remote > chapter.remoteIndex ? chapter.bodyEnd : chapter.lineStart
+        }
         if isEnd { return totalUTF16 }
         guard let chapter = currentChapter else { return anchorOffset }
         if position.pageIndex <= 0 { return chapter.lineStart }
@@ -445,10 +602,22 @@ final class ReaderEngine {
     }
 
     func neighbor(after position: ReaderPosition) -> ReaderPosition? {
-        if position.chapterIndex >= chapters.count { return nil }
+        if position.boundaryRemote != nil || position.chapterIndex >= chapters.count { return nil }
         let pages = layout(for: position.chapterIndex)?.pageCount ?? 1
         if position.pageIndex + 1 < pages {
             return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: position.pageIndex + 1)
+        }
+        if remoteChapterCount > 0, let remote = remoteIndex(at: position.chapterIndex) {
+            let nextRemote = remote + 1
+            guard nextRemote < remoteChapterCount else { return nil }
+            if let loaded = engineIndex(ofRemote: nextRemote) {
+                return ReaderPosition(chapterIndex: loaded, pageIndex: 0)
+            }
+            return ReaderPosition(
+                chapterIndex: position.chapterIndex,
+                pageIndex: position.pageIndex + 1,
+                boundaryRemote: nextRemote
+            )
         }
         let next = position.chapterIndex + 1
         guard next < chapters.count else { return nil }
@@ -456,6 +625,15 @@ final class ReaderEngine {
     }
 
     func neighbor(before position: ReaderPosition) -> ReaderPosition? {
+        if let remote = position.boundaryRemote,
+           chapters.indices.contains(position.chapterIndex) {
+            let origin = chapters[position.chapterIndex]
+            if remote > origin.remoteIndex {
+                let pages = layout(for: position.chapterIndex)?.pageCount ?? 1
+                return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: max(pages - 1, 0))
+            }
+            return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: 0)
+        }
         if position.chapterIndex >= chapters.count {
             guard !chapters.isEmpty else { return nil }
             let last = chapters.count - 1
@@ -464,6 +642,15 @@ final class ReaderEngine {
         }
         if position.pageIndex > 0 {
             return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: position.pageIndex - 1)
+        }
+        if remoteChapterCount > 0, let remote = remoteIndex(at: position.chapterIndex) {
+            let previousRemote = remote - 1
+            guard previousRemote >= 0 else { return nil }
+            if let loaded = engineIndex(ofRemote: previousRemote) {
+                let pages = layout(for: loaded)?.pageCount ?? 1
+                return ReaderPosition(chapterIndex: loaded, pageIndex: max(pages - 1, 0))
+            }
+            return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: -1, boundaryRemote: previousRemote)
         }
         let previous = position.chapterIndex - 1
         guard previous >= 0 else { return nil }
@@ -494,7 +681,14 @@ final class ReaderEngine {
     private func commit() {
         anchorOffset = currentUTF16()
         let index = min(max(position.chapterIndex, 0), max(chapters.count - 1, 0))
-        let title = isEnd ? (chapters.last?.title ?? "") : (currentChapter?.title ?? "")
+        let title: String
+        if position.boundaryRemote != nil, chapters.indices.contains(position.chapterIndex) {
+            title = chapters[position.chapterIndex].title
+        } else if isEnd {
+            title = chapters.last?.title ?? ""
+        } else {
+            title = currentChapter?.title ?? ""
+        }
         if nextChapterFailed, failedAt != position {
             nextChapterFailed = false
             failedAt = nil
@@ -510,11 +704,40 @@ final class ReaderEngine {
     }
 
     private func requestNextIfNeeded() {
+        if remoteChapterCount > 0 {
+            guard let remote = position.boundaryRemote, !askedForNext, !nextChapterFailed else { return }
+            askedForNext = true
+            onNeedRemoteChapter?(remote)
+            return
+        }
         guard hasUnloadedChapters, !askedForNext, !nextChapterFailed else { return }
         guard pageSize.width > 40, pageSize.height > 40 else { return }
         guard isOnLastLoadedPage else { return }
         askedForNext = true
         onNeedNextChapter?()
+    }
+
+    private func retryBoundary() {
+        nextChapterFailed = false
+        askedForNext = false
+        failedAt = nil
+        layoutRevision += 1
+        commit()
+    }
+
+    private func boundaryIsPrevious(_ position: ReaderPosition) -> Bool {
+        guard let remote = position.boundaryRemote,
+              let origin = remoteIndex(at: position.chapterIndex) else { return false }
+        return remote < origin
+    }
+
+    private func remoteIndex(at engineIndex: Int) -> Int? {
+        guard chapters.indices.contains(engineIndex) else { return nil }
+        return chapters[engineIndex].remoteIndex
+    }
+
+    private func engineIndex(ofRemote remoteIndex: Int) -> Int? {
+        chapters.firstIndex { $0.remoteIndex == remoteIndex }
     }
 
     private func relayoutKeepingOffset() {
@@ -580,6 +803,29 @@ final class ReaderEngine {
         case .page:
             go(delta: 1)
         case .chapter:
+            if remoteChapterCount > 0, let remote = remoteIndex(at: position.chapterIndex) {
+                let nextRemote = remote + 1
+                guard nextRemote < remoteChapterCount else {
+                    haltSpeech()
+                    return
+                }
+                if let engineIndex = engineIndex(ofRemote: nextRemote) {
+                    animateNextTurn = true
+                    position = ReaderPosition(chapterIndex: engineIndex, pageIndex: 0)
+                    commit()
+                    speakCurrentChapter()
+                } else {
+                    animateNextTurn = true
+                    position = ReaderPosition(
+                        chapterIndex: position.chapterIndex,
+                        pageIndex: position.pageIndex,
+                        boundaryRemote: nextRemote
+                    )
+                    commit()
+                    haltSpeech()
+                }
+                return
+            }
             let nextIndex = position.chapterIndex + 1
             guard nextIndex < chapters.count else {
                 haltSpeech()

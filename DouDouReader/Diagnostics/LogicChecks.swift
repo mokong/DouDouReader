@@ -30,6 +30,9 @@ enum LogicChecks {
         checkPaginator(&errors)
         checkEngine(&errors)
         checkLazyChapter(&errors)
+        checkReaderCatalog(&errors)
+        checkBookIdentity(&errors)
+        checkSparseChapter(&errors)
         checkEncoding(&errors)
         checkAuthor(&errors)
         checkBlockWords(&errors)
@@ -39,6 +42,8 @@ enum LogicChecks {
         checkTransportPolicy(&errors)
         checkBookSourceParsing(&errors)
         checkEpub(&errors)
+        checkBookSearch(&errors)
+        checkSourceSwitchHits(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -256,6 +261,143 @@ enum LogicChecks {
         }
         if tail.position != ReaderPosition(chapterIndex: 1, pageIndex: 0) || tail.isEnd {
             errors.append("停在加载页时追加应进入新章")
+        }
+    }
+
+    /// 在线书的目录用保存下来的全部章节名。只下载了第一章时，后面的章节也要列出来。
+    private static func checkReaderCatalog(_ errors: inout [String]) {
+        let online = ReaderCatalog.rows(
+            engineTitles: ["第一章 甲"],
+            remoteTitles: ["第一章 甲", "第二章 乙", "第三章 丙"],
+            loadedIndices: [0]
+        )
+        if online.map(\.title) != ["第一章 甲", "第二章 乙", "第三章 丙"]
+            || online.map(\.isLoaded) != [true, false, false] {
+            errors.append("在线目录应当列出还没下载的章节")
+        }
+        let local = ReaderCatalog.rows(engineTitles: ["序章", "第一章"], remoteTitles: [], loadedIndices: [])
+        if local.map(\.title) != ["序章", "第一章"] || local.contains(where: { !$0.isLoaded }) {
+            errors.append("本地目录应当只用已经拆出的章节")
+        }
+        let blank = ReaderCatalog.rows(engineTitles: ["书名"], remoteTitles: ["  ", ""], loadedIndices: [0])
+        if blank.map(\.title) != ["书名", "第2章"] || blank.map(\.isLoaded) != [true, false] {
+            errors.append("空白的远端章节名应当回退 \(blank.map(\.title))")
+        }
+        let gap = ReaderCatalog.rows(
+            engineTitles: ["第一章 甲", "第六章 己"],
+            remoteTitles: ["第一章 甲", "第二章 乙", "第三章 丙", "第四章 丁", "第五章 戊", "第六章 己"],
+            loadedIndices: [0, 5]
+        )
+        if gap.map(\.isLoaded) != [true, false, false, false, false, true] {
+            errors.append("目录不该把中间空档标成已下载")
+        }
+    }
+
+    private static func checkBookIdentity(_ errors: inout [String]) {
+        if !BookIdentity.same(title: "《三体》", author: "刘慈欣", otherTitle: "三体", otherAuthor: "刘慈欣") {
+            errors.append("同一本书应当认作一本")
+        }
+        if BookIdentity.same(title: "三体", author: "刘慈欣", otherTitle: "三体", otherAuthor: "王晋康") {
+            errors.append("作者不同不应当并成一本")
+        }
+        if !BookIdentity.same(title: "三体", author: "", otherTitle: "三体", otherAuthor: "刘慈欣") {
+            errors.append("一边没有作者时按书名并成一本")
+        }
+    }
+
+    /// 跳到后面的章节只下载那一章。滑到交界处才要相邻的一章。
+    private static func checkSparseChapter(_ errors: inout [String]) {
+        let settings = ReaderSettingsStore(loadSaved: false)
+        let engine = ReaderEngine(
+            stored: [StoredChapter(index: 0, title: "第一章 甲", body: "很短。")],
+            remoteCount: 4,
+            fallbackTitle: "测",
+            startOffset: 0,
+            settings: settings
+        )
+        engine.setPageSize(CGSize(width: 180, height: 240))
+        guard engine.layout(for: 0)?.pageCount == 1 else {
+            errors.append("稀疏章应当只有一页")
+            return
+        }
+        var asked: [Int] = []
+        engine.onNeedRemoteChapter = { asked.append($0) }
+        if !asked.isEmpty {
+            errors.append("还没到交界不该要章节")
+            return
+        }
+        engine.go(delta: 1)
+        if asked != [1] || engine.position.boundaryRemote != 1 {
+            errors.append("章末应当只请求下一章 \(asked) \(String(describing: engine.position.boundaryRemote))")
+            return
+        }
+        guard engine.insertRemoteChapter(remoteIndex: 3, title: "第四章 丁", body: "很远。") else {
+            errors.append("插入远处章节失败")
+            return
+        }
+        if engine.position.boundaryRemote != 1 || engine.chapters.map(\.remoteIndex) != [0, 3] {
+            errors.append("插入不相邻的章节不该离开交界 \(engine.chapters.map(\.remoteIndex))")
+            return
+        }
+        guard engine.insertRemoteChapter(remoteIndex: 1, title: "第二章 乙", body: "相邻。") else {
+            errors.append("插入相邻章节失败")
+            return
+        }
+        if engine.position.chapterIndex != 1 || engine.position.boundaryRemote != nil
+            || engine.chapters.map(\.remoteIndex) != [0, 1, 3] {
+            errors.append("补上相邻章节后应进入该章 \(engine.chapters.map(\.remoteIndex))")
+            return
+        }
+        let first = ChapterSplitter.substring(engine.source, start: engine.chapters[0].bodyStart, end: engine.chapters[0].bodyEnd)
+        let second = ChapterSplitter.substring(engine.source, start: engine.chapters[1].bodyStart, end: engine.chapters[1].bodyEnd)
+        if !first.contains("很短") || !second.contains("相邻") {
+            errors.append("插入后正文串了")
+        }
+        engine.jump(to: 0)
+        asked.removeAll()
+        engine.go(delta: 1)
+        if engine.position.chapterIndex != 1 || engine.position.boundaryRemote != nil || !asked.isEmpty {
+            errors.append("下一章已经在本地时应直接翻过去")
+        }
+        engine.jumpToRemote(3)
+        asked.removeAll()
+        engine.go(delta: -1)
+        if asked != [2] || engine.position.boundaryRemote != 2 {
+            errors.append("章首应当只请求上一章 \(asked) \(String(describing: engine.position.boundaryRemote))")
+        }
+        engine.noteNextChapterFailed()
+        if !engine.isChapterLoadFailed {
+            errors.append("章节加载失败后应当能重试")
+            return
+        }
+        asked.removeAll()
+        engine.retryCurrentChapter()
+        if asked != [2] || engine.isChapterLoadFailed || engine.position.boundaryRemote != 2 {
+            errors.append("重试应当再请求这一章 \(asked)")
+        }
+    }
+
+    private static func checkSourceSwitchHits(_ errors: inout [String]) {
+        let batches = [
+            SourceSearchBatch(sourceID: "current", sourceName: "当前", phase: .books([
+                CatalogBook(id: "same", title: "三体", author: "刘慈欣", summary: "")
+            ])),
+            SourceSearchBatch(sourceID: "other", sourceName: "乙源", phase: .books([
+                CatalogBook(id: "ok", title: "《三体》", author: "刘慈欣", summary: "最新"),
+                CatalogBook(id: "no", title: "三体", author: "别人", summary: ""),
+                CatalogBook(id: "same", title: "三体", author: "刘慈欣", summary: "同一地址")
+            ])),
+            SourceSearchBatch(sourceID: "down", sourceName: "丙源", phase: .failed("超时"))
+        ]
+        let hits = BookSearch.switchHits(
+            title: "三体",
+            author: "刘慈欣",
+            excludingSourceID: "current",
+            excludingBookID: "same",
+            batches: batches
+        )
+        if hits.map(\.sourceID) != ["other"] || hits.map(\.book.id) != ["ok"] {
+            errors.append("换源应当只留下其他书源里的同一本书")
         }
     }
 
@@ -642,6 +784,26 @@ enum LogicChecks {
         } else {
             errors.append("切换列表没有 69书吧")
         }
+        if let b365 = BookSourceLibrary.switchable(records: []).first(where: { $0.id == "preset-biqu365" }) {
+            switch finishAsync({ try await probeBiqu365Book(recordID: b365.id, source: b365.source) }) {
+            case .failure(let error):
+                errors.append("笔趣阁365正文抓取失败：\(error)")
+            case .success(let message):
+                if let message {
+                    errors.append(message)
+                }
+            }
+        } else {
+            errors.append("切换列表没有笔趣阁365")
+        }
+        switch finishAsync({ try await probeOpeningChapterOrder() }) {
+        case .failure(let error):
+            errors.append("最新章节横幅目录测试失败：\(error)")
+        case .success(let message):
+            if let message {
+                errors.append(message)
+            }
+        }
         CatalogURLStub.setRoutes([:])
 
         // 5. 测试 SourceRecord 与 SwiftData 兼容字段
@@ -659,10 +821,10 @@ enum LogicChecks {
             errors.append("启用书源中未生成 RuleBasedBookCatalog")
         }
 
-        // 6. 测试预设 10 大书源规范与完整性
+        // 6. 测试预设书源规范与完整性
         let presets = PresetBookSources.all
-        if presets.count != 10 {
-            errors.append("预设书源数量不为 10: \(presets.count)")
+        if presets.count != 28 {
+            errors.append("预设书源数量不为 28: \(presets.count)")
         }
         let legadoPresets = presets.filter { $0.kind == .legado }
         let xiangsePresets = presets.filter { $0.kind == .xiangse }
@@ -755,10 +917,17 @@ enum LogicChecks {
                     return
                 }
                 object.removeValue(forKey: "exploreRule")
+                if var toc = object["tocRule"] as? [String: Any] {
+                    toc.removeValue(forKey: "startAtFirstChapter")
+                    object["tocRule"] = toc
+                }
                 let stripped = try JSONSerialization.data(withJSONObject: object)
                 let decoded = try JSONDecoder().decode(UniversalBookSource.self, from: stripped)
                 if decoded.name != preset.source.name || !decoded.exploreRule.urlTemplate.isEmpty {
                     errors.append("旧书源 JSON 缺少发现规则时还原失败")
+                }
+                if decoded.tocRule.startAtFirstChapter {
+                    errors.append("旧目录规则被当成从第1章开始")
                 }
             } catch {
                 errors.append("旧书源 JSON 解码失败 \(error)")
@@ -1250,6 +1419,135 @@ enum LogicChecks {
         return nil
     }
 
+    /// 详情页没有完整目录。目录在 div.gongneng 指向的 ul.info。正文用 br 分行，两页写在同一个 #txt 里。
+    private nonisolated static func probeBiqu365Book(recordID: String, source: UniversalBookSource) async throws -> String? {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CatalogURLStub.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let detail = """
+        <h1>词条修仙</h1>
+        <div class="gongneng">
+          <span><a href="/newbook/082952/">全部章节目录</a></span>
+          <span><a href="javascript:void(0)">加入书架</a></span>
+        </div>
+        <ul class="newchapter"><li><a href="/chapter/082952/2.html">第2章 后写的</a></li></ul>
+        """
+        let catalog = """
+        <ul class="info">
+          <li><a href="/chapter/082952/1.html">第1章 开局</a></li>
+          <li><a href="/chapter/082952/2.html">第2章 后写的</a></li>
+        </ul>
+        """
+        let first = """
+        <div id="txt" class="txt">
+          <p style="font-weight:bold";>一秒记住【笔趣阁】biquge365.net，更新快，无弹窗！</p><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;第1章 开局(第1/2页)<br/>
+          &nbsp;&nbsp;&nbsp;&nbsp;开局只有一条大裤衩。<br/>
+          &nbsp;&nbsp;&nbsp;&nbsp;（本章未完，请点击下一页继续阅读）第1章 开局(第2/2页)<br/>
+          &nbsp;&nbsp;&nbsp;&nbsp;海风灌进裤管。<br/>
+        </div>
+        """
+        let second = """
+        <div id="txt"><p>一秒记住【笔趣阁】biquge365.net，更新快，无弹窗！</p><br>&nbsp;&nbsp;&nbsp;&nbsp;灯塔还亮着。</div>
+        """
+        CatalogURLStub.setRoutes([
+            "/book/082952": (200, Data(detail.utf8)),
+            "/book/082952/": (200, Data(detail.utf8)),
+            "/newbook/082952": (200, Data(catalog.utf8)),
+            "/newbook/082952/": (200, Data(catalog.utf8)),
+            "/chapter/082952/1.html": (200, Data(first.utf8)),
+            "/chapter/082952/2.html": (200, Data(second.utf8))
+        ])
+        let downloader = RuleBasedBookCatalog(recordID: recordID, source: source, session: session)
+        let opening = try await downloader.fetchOpening(bookID: "https://www.biquge365.net/book/082952/")
+        if opening.title != "词条修仙" {
+            return "笔趣阁365书名不符 \(opening.title)"
+        }
+        if opening.chapters.count != 2 || opening.chapters.first?.title != "第1章 开局" {
+            return "笔趣阁365目录不符 \(opening.chapters.map(\.title))"
+        }
+        guard let pants = opening.text.range(of: "开局只有一条大裤衩。"),
+              let wind = opening.text.range(of: "海风灌进裤管。"),
+              pants.upperBound < wind.lowerBound else {
+            return "笔趣阁365两页顺序不符 \(opening.text)"
+        }
+        if opening.text.contains("开局只有一条大裤衩。 海风灌进裤管。") {
+            return "笔趣阁365正文被连成一段 \(opening.text)"
+        }
+        if opening.text.contains("笔趣阁") || opening.text.contains("本章未完") || opening.text.contains("第1/2页") || opening.text.contains("第2/2页") {
+            return "笔趣阁365正文混进了水印或分页 \(opening.text)"
+        }
+        if opening.text.contains("灯塔还亮着") {
+            return "点开笔趣阁365应当只带第一章"
+        }
+        let next = try await downloader.fetchChapterText(url: opening.chapters[1].url)
+        if !next.contains("灯塔还亮着。") || next.contains("笔趣阁") || next.contains("大裤衩") {
+            return "笔趣阁365下一章正文不符 \(next)"
+        }
+        return nil
+    }
+
+    /// 横幅在前、第1章在后时，打开的是第1章，横幅里多出来的章补到目录末尾。没开这个开关时仍按页面顺序。
+    private nonisolated static func probeOpeningChapterOrder() async throws -> String? {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CatalogURLStub.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let detail = """
+        <h1>横幅测试</h1>
+        <div id="list">
+          <dd><a href="/banner/3.html">第3章 只在横幅</a></dd>
+          <dd><a href="/banner/1.html">第 1 章 开端</a></dd>
+          <dd><a href="/banner/2.html">第2章 接着</a></dd>
+        </div>
+        """
+        let first = "<div id=\"content\">开端写在第一章。</div>"
+        let second = "<div id=\"content\">接着写下去。</div>"
+        let third = "<div id=\"content\">横幅里的句子。</div>"
+        CatalogURLStub.setRoutes([
+            "/bannerbook/9": (200, Data(detail.utf8)),
+            "/banner/1.html": (200, Data(first.utf8)),
+            "/banner/2.html": (200, Data(second.utf8)),
+            "/banner/3.html": (200, Data(third.utf8))
+        ])
+
+        func source(startsAtFirst: Bool) -> UniversalBookSource {
+            UniversalBookSource(
+                kind: .legado,
+                name: "横幅目录",
+                sourceURL: "https://banner.test",
+                searchRule: SourceSearchRule(urlTemplate: "https://banner.test/?keyword={{key}}"),
+                tocRule: SourceTocRule(
+                    listSelector: "#list a",
+                    nameSelector: "text",
+                    urlSelector: "href",
+                    startAtFirstChapter: startsAtFirst
+                ),
+                contentRule: SourceContentRule(contentSelector: "#content@text")
+            )
+        }
+
+        let ordered = RuleBasedBookCatalog(recordID: "banner-order", source: source(startsAtFirst: true), session: session)
+        let opening = try await ordered.fetchOpening(bookID: "https://banner.test/bannerbook/9")
+        if opening.chapters.count != 3
+            || opening.chapters[0].title != "第 1 章 开端"
+            || opening.chapters[2].title != "第3章 只在横幅" {
+            return "横幅目录没有从第1章排到补上的末章 \(opening.chapters.map(\.title))"
+        }
+        if !opening.text.contains("开端写在第一章。") || opening.text.contains("横幅里的句子") {
+            return "横幅目录打开的不是第一章 \(opening.text)"
+        }
+        let kept = RuleBasedBookCatalog(recordID: "banner-keep", source: source(startsAtFirst: false), session: session)
+        let original = try await kept.fetchOpening(bookID: "https://banner.test/bannerbook/9")
+        if original.chapters.first?.title != "第3章 只在横幅" || !original.text.contains("横幅里的句子") {
+            return "没开从第1章开始时目录被改写了 \(original.chapters.map(\.title))"
+        }
+        return nil
+    }
+
     private nonisolated struct SourceProbe: Sendable {
         var sampleTitle = ""
         var sampleAuthor = ""
@@ -1700,6 +1998,135 @@ enum LogicChecks {
             data.append(UInt8(remaining & 0xFF))
             remaining >>= 8
         }
+    }
+
+    private static func checkBookSearch(_ errors: inout [String]) {
+        if BookSearch.shelfHit(title: "灯塔邮局", author: "豆豆", query: "  ") {
+            errors.append("空白关键词不该命中书架")
+        }
+        if !BookSearch.shelfHit(title: "灯塔邮局", author: "豆豆", query: "灯塔")
+            || !BookSearch.shelfHit(title: "灯塔邮局", author: "豆豆", query: "豆") {
+            errors.append("书架搜索没有命中书名或作者")
+        }
+        let suiteName = "doudou.search.logic.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            errors.append("搜索历史无法建立测试存储")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var history = BookSearchHistory.remember(" 灯塔 ", defaults: defaults)
+        history = BookSearchHistory.remember("完美世界", defaults: defaults)
+        history = BookSearchHistory.remember("灯塔", defaults: defaults)
+        if history != ["灯塔", "完美世界"] {
+            errors.append("搜索历史没有去重或没有把最近的词放到前面 \(history)")
+        }
+        history = BookSearchHistory.remember("Light", defaults: defaults)
+        history = BookSearchHistory.remember("light", defaults: defaults)
+        if history.first != "light" || history.filter({ $0.caseInsensitiveCompare("light") == .orderedSame }).count != 1 {
+            errors.append("搜索历史大小写没有合并 \(history)")
+        }
+        for index in 0..<14 {
+            history = BookSearchHistory.remember("词\(index)", defaults: defaults)
+        }
+        if history.count != BookSearchHistory.limit || history.first != "词13" || history.contains("灯塔") {
+            errors.append("搜索历史没有只保留最近 \(BookSearchHistory.limit) 条 \(history)")
+        }
+        BookSearchHistory.clear(defaults: defaults)
+        if !BookSearchHistory.load(defaults: defaults).isEmpty {
+            errors.append("清空搜索历史失败")
+        }
+
+        let kept = SourceSearchBatch(sourceID: "a", sourceName: "甲", phase: .books([
+            CatalogBook(id: "1", title: "灯塔", author: "", summary: "")
+        ]))
+        let empty = SourceSearchBatch(sourceID: "b", sourceName: "乙", phase: .books([]))
+        let waiting = SourceSearchBatch(sourceID: "c", sourceName: "丙", phase: .searching)
+        let failed = SourceSearchBatch(sourceID: "d", sourceName: "丁", phase: .failed("超时"))
+        let listed = BookSearch.listed([kept, empty, waiting, failed]).map(\.sourceID)
+        if listed != ["a", "c", "d"] {
+            errors.append("没有结果的书源仍留在切换条上 \(listed)")
+        }
+
+        let outcome = finishAsync { () -> [String] in
+            let box = StoredResultBox<[String]>()
+            box.value = []
+            await BookSearch.run(
+                query: " 灯塔 ",
+                sources: [
+                    searchStub("fast", "快"),
+                    searchStub("slow", "慢"),
+                    searchStub("bad", "坏")
+                ],
+                concurrency: 2,
+                timeout: .milliseconds(250),
+                search: { source, query in
+                    if source.id == "fast" {
+                        if query != "灯塔" { throw SourceError.badResponse }
+                        return [CatalogBook(id: "1", title: "灯塔邮局", author: "豆豆", summary: "")]
+                    }
+                    if source.id == "slow" {
+                        try await Task.sleep(for: .seconds(30))
+                        return []
+                    }
+                    throw SourceError.unreachable
+                },
+                onUpdate: { batch in
+                    let mark: String
+                    switch batch.phase {
+                    case .books(let books):
+                        mark = books.map(\.title).joined(separator: ",")
+                    case .failed(let message):
+                        mark = "失败:" + message
+                    case .searching:
+                        mark = "搜索中"
+                    }
+                    box.value?.append(batch.sourceID + "=" + mark)
+                }
+            )
+            return box.value ?? []
+        }
+        switch outcome {
+        case .failure(let failure):
+            errors.append("多书源搜索没有完成 \(failure)")
+        case .success(let lines):
+            let text = lines.sorted().joined(separator: "|")
+            if text != "bad=失败:连不上这本书源|fast=灯塔邮局|slow=失败:超时" {
+                errors.append("多书源搜索结果不对 \(text)")
+            }
+        }
+
+        let cancelled = finishAsync { () -> String in
+            let task = Task {
+                await BookSearch.run(
+                    query: "灯塔",
+                    sources: [searchStub("slow", "慢")],
+                    timeout: .seconds(30),
+                    search: { _, _ in
+                        try await Task.sleep(for: .seconds(30))
+                        return []
+                    },
+                    onUpdate: { _ in }
+                )
+                return "结束"
+            }
+            task.cancel()
+            return await task.value
+        }
+        if case .failure(let failure) = cancelled {
+            errors.append("取消搜索没有停下来 \(failure)")
+        }
+    }
+
+    private nonisolated static func searchStub(_ id: String, _ name: String) -> SwitchableSource {
+        SwitchableSource(
+            id: id,
+            name: name,
+            icon: "",
+            note: "",
+            group: "",
+            host: "",
+            source: UniversalBookSource(kind: .doudou, name: name, sourceURL: "https://example.com")
+        )
     }
 
     private static func hexBytes(_ hex: String) -> Data {
