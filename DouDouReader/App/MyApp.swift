@@ -24,7 +24,7 @@ struct MyApp: App {
     var body: some Scene {
         WindowGroup {
             SystemAppearanceReader {
-                BookshelfView()
+                HomeShell()
             }
             .environment(settings)
             .modelContainer(container)

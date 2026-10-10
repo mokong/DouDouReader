@@ -4,8 +4,93 @@ import UniformTypeIdentifiers
 
 enum ShelfDestination: Hashable {
     case book(UUID)
-    case sources
     case search
+}
+
+enum HomeTab: Hashable {
+    case shelf
+    case discover
+}
+
+/// 主页两栏：书架接着读，发现页浏览当前书源。
+struct HomeShell: View {
+    @State private var tab = HomeTab.shelf
+    @State private var shelfPath: [ShelfDestination] = []
+
+    private var showsTabs: Bool {
+        tab == .discover || shelfPath.isEmpty
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                BookshelfView(path: $shelfPath)
+                    .opacity(tab == .shelf ? 1 : 0)
+                    .allowsHitTesting(tab == .shelf)
+                    .accessibilityHidden(tab != .shelf)
+                if tab == .discover {
+                    NavigationStack {
+                        SourceBrowserView { id in
+                            shelfPath = [.book(id)]
+                            tab = .shelf
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if showsTabs {
+                homeTabs
+            }
+        }
+        .background((tab == .discover ? Color.black : ShelfInk.paper).ignoresSafeArea())
+        .preferredColorScheme(windowScheme)
+        .onAppear(perform: openLaunchTab)
+    }
+
+    /// 阅读页自己决定明暗。发现页保持深色，书架保持暖纸色。
+    private var windowScheme: ColorScheme? {
+        if tab == .discover { return .dark }
+        if shelfPath.contains(where: { if case .book = $0 { return true }; return false }) {
+            return nil
+        }
+        return .light
+    }
+
+    private var homeTabs: some View {
+        HStack(spacing: 0) {
+            tabButton("书架", systemImage: "books.vertical", value: .shelf)
+            tabButton("发现", systemImage: "safari", value: .discover)
+        }
+        .padding(.top, 6)
+        .padding(.bottom, 2)
+        .background(tab == .discover ? Color.black : ShelfInk.paper)
+    }
+
+    private func tabButton(_ title: String, systemImage: String, value: HomeTab) -> some View {
+        let selected = tab == value
+        let idle = tab == .discover ? Color.white.opacity(0.55) : ShelfInk.secondary
+        return Button {
+            tab = value
+        } label: {
+            VStack(spacing: 2) {
+                Image(systemName: systemImage)
+                    .font(.body)
+                Text(title)
+                    .font(.caption2)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+            .foregroundStyle(selected ? ShelfInk.accent : idle)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func openLaunchTab() {
+        if ProcessInfo.processInfo.arguments.contains("-openSources") {
+            tab = .discover
+        }
+    }
 }
 
 enum ShelfSort: String, CaseIterable, Identifiable {
@@ -25,13 +110,13 @@ enum ShelfSort: String, CaseIterable, Identifiable {
 }
 
 struct BookshelfView: View {
+    @Binding var path: [ShelfDestination]
     @Environment(ReaderSettingsStore.self) private var settings
     @Environment(\.modelContext) private var modelContext
     @Query private var books: [BookRecord]
     @AppStorage("shelf.sort") private var sortRaw = ShelfSort.recent.rawValue
     @AppStorage("shelf.group") private var groupFilter = "全部"
     @AppStorage("shelf.layout") private var layoutRaw = "grid"
-    @State private var path: [ShelfDestination] = []
     @State private var importingText = false
     @State private var importingFont = false
     @State private var addingGroup = false
@@ -65,7 +150,7 @@ struct BookshelfView: View {
     var body: some View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
-                restingHeader
+                shelfBar
                 groupBar
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
@@ -85,9 +170,6 @@ struct BookshelfView: View {
             }
             .geometryGroup()
             .background(ShelfInk.paper.ignoresSafeArea())
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                restingSearch
-            }
             .navigationDestination(for: ShelfDestination.self) { destination in
                 switch destination {
                 case .book(let id):
@@ -95,10 +177,6 @@ struct BookshelfView: View {
                         ReaderScreen(book: book)
                     } else {
                         missingBook
-                    }
-                case .sources:
-                    SourceBrowserView { id in
-                        path = [.book(id)]
                     }
                 case .search:
                     BookSearchView { id in
@@ -109,7 +187,6 @@ struct BookshelfView: View {
             #if os(iOS) || os(visionOS)
             .toolbar(.hidden, for: .navigationBar)
             #endif
-            .preferredColorScheme(.light)
             .tint(ShelfInk.accent)
         }
         .fileImporter(
@@ -156,10 +233,6 @@ struct BookshelfView: View {
             Text(pendingDelete.map { "《\($0.title)》会从书架和本地文件里删除。" } ?? "")
         }
         .task {
-            if ProcessInfo.processInfo.arguments.contains("-openSources") {
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                openSources()
-            }
             if ProcessInfo.processInfo.arguments.contains("-openSearch") {
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 openSearch()
@@ -168,9 +241,6 @@ struct BookshelfView: View {
         .onAppear {
             LogicChecks.exitIfRequested()
             try? BookLibrary.collapseOnlineDuplicates(context: modelContext)
-            if ProcessInfo.processInfo.arguments.contains("-openSources") {
-                openSources()
-            }
             if ProcessInfo.processInfo.arguments.contains("-openSearch") {
                 openSearch()
             }
@@ -221,18 +291,10 @@ struct BookshelfView: View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 108, maximum: 150), spacing: 16)], spacing: 18) {
             ForEach(visibleBooks, id: \.id) { book in
                 NavigationLink(value: ShelfDestination.book(book.id)) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        BookCover(book: book)
-                        Text(book.author.isEmpty ? "未知作者" : book.author)
-                            .font(.caption)
-                            .foregroundStyle(ShelfInk.secondary)
-                            .lineLimit(1)
-                        Text(progressText(book))
-                            .font(.caption2)
-                            .foregroundStyle(ShelfInk.secondary)
-                    }
+                    BookCover(book: book)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(book.title)
                 .contextMenu { bookMenu(book) }
             }
         }
@@ -288,11 +350,14 @@ struct BookshelfView: View {
             Text(books.isEmpty ? "书架还是空的" : "这个分组里没有书")
                 .font(.headline)
                 .foregroundStyle(ShelfInk.ink)
-            Text("导入 txt，或先读一本示例。")
-                .font(.subheadline)
-                .foregroundStyle(ShelfInk.secondary)
-            Button("放入示例《灯塔邮局》", action: openSample)
-                .buttonStyle(.borderedProminent)
+            if books.isEmpty {
+                Text("点右上角加号导入 txt 或 EPUB，也可以先读示例。")
+                    .font(.subheadline)
+                    .foregroundStyle(ShelfInk.secondary)
+                    .multilineTextAlignment(.center)
+                Button("放入示例《灯塔邮局》", action: openSample)
+                    .buttonStyle(.borderedProminent)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 48)
@@ -302,58 +367,33 @@ struct BookshelfView: View {
         ContentUnavailableView("找不到这本书", systemImage: "book.closed", description: Text("它可能刚被移出书架。"))
     }
 
-    private var restingHeader: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Spacer()
-                addMenu
+    private var shelfBar: some View {
+        HStack(spacing: 0) {
+            shelfMenu
+            Spacer(minLength: 0)
+            Button(action: openSearch) {
+                Image(systemName: "magnifyingglass")
+                    .frame(width: 44, height: 44)
             }
-            .padding(.horizontal, 16)
-            Text("豆豆阅读")
-                .font(.largeTitle.bold())
-                .foregroundStyle(ShelfInk.ink)
-                .padding(.horizontal, 20)
-                .padding(.top, 2)
-                .padding(.bottom, 4)
-        }
-    }
-
-    private var restingSearch: some View {
-        Button(action: openSearch) {
-            searchCapsule {
-                Text("搜索书名或作者")
-                    .foregroundStyle(ShelfInk.secondary)
-                Spacer(minLength: 0)
+            .accessibilityLabel("搜索书名或作者")
+            Button {
+                importingText = true
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 44, height: 44)
             }
+            .accessibilityLabel("导入书籍")
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
-        .accessibilityLabel("搜索书名或作者")
+        .font(.body.weight(.semibold))
+        .foregroundStyle(ShelfInk.ink)
+        .padding(.horizontal, 8)
+        .padding(.top, 4)
     }
 
-    private func searchCapsule<Label: View>(@ViewBuilder label: () -> Label) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.body.weight(.medium))
-                .foregroundStyle(ShelfInk.secondary)
-            label()
-        }
-        .padding(.horizontal, 16)
-        .frame(height: 48)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ShelfInk.card, in: Capsule())
-        .overlay(Capsule().stroke(ShelfInk.line, lineWidth: 1))
-    }
-
-    private var addMenu: some View {
+    private var shelfMenu: some View {
         Menu {
-            Button { importingText = true } label: { Label("导入书籍", systemImage: "doc.text") }
-            Button { importingFont = true } label: { Label("导入字体", systemImage: "textformat") }
-            Button(action: openSample) { Label("示例小说", systemImage: "book") }
-            Button(action: openSources) { Label("书源", systemImage: "dot.radiowaves.left.and.right") }
             Button { addingGroup = true } label: { Label("新建分组", systemImage: "folder.badge.plus") }
+            Button { importingFont = true } label: { Label("导入字体", systemImage: "textformat") }
             Divider()
             Picker("排序", selection: $sortRaw) {
                 ForEach(ShelfSort.allCases) { item in
@@ -366,14 +406,10 @@ struct BookshelfView: View {
                 Label(showsGrid ? "列表" : "封面", systemImage: showsGrid ? "list.bullet" : "square.grid.2x2")
             }
         } label: {
-            Image(systemName: "plus")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(ShelfInk.ink)
+            Image(systemName: "folder")
                 .frame(width: 44, height: 44)
-                .background(ShelfInk.card, in: Circle())
-                .overlay(Circle().stroke(ShelfInk.line, lineWidth: 1))
         }
-        .accessibilityLabel("添加")
+        .accessibilityLabel("整理书架")
     }
 
     private func continueCard(_ book: BookRecord) -> some View {
@@ -456,12 +492,6 @@ struct BookshelfView: View {
             if order != .orderedSame { return order == .orderedAscending }
         }
         return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-    }
-
-    private func openSources() {
-        if !path.contains(.sources) {
-            path.append(.sources)
-        }
     }
 
     private func openSearch() {
