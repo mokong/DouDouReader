@@ -20,6 +20,9 @@ struct ReaderScreen: View {
     @State private var catalogFailedIndex: Int?
     @State private var readerGeneration = 0
     @State private var chapterFetchInFlight = false
+    /// 打开书时解析一次的目录执行器，翻章复用；换源（remoteSourceID 变化）时自动重建。
+    @State private var cachedCatalog: IncrementalBookCatalog?
+    @State private var cachedCatalogSourceID: String?
     @State private var showSourceSwitch = false
     @State private var switchChapterTitle = ""
     @State private var showCache = false
@@ -736,10 +739,18 @@ struct ReaderScreen: View {
             catalogStatus = "正在加载\(name)"
         }
         do {
-            let records = (try? modelContext.fetch(FetchDescriptor<SourceRecord>())) ?? []
-            guard let item = BookSourceLibrary.switchable(records: records).first(where: { $0.id == book.remoteSourceID }),
-                  let catalog = BookSourceLibrary.catalog(for: item) as? IncrementalBookCatalog else {
-                throw SourceError.unreachable
+            let catalog: IncrementalBookCatalog
+            if let cached = cachedCatalog, cachedCatalogSourceID == book.remoteSourceID {
+                catalog = cached
+            } else {
+                let records = (try? modelContext.fetch(FetchDescriptor<SourceRecord>())) ?? []
+                guard let item = BookSourceLibrary.switchable(records: records).first(where: { $0.id == book.remoteSourceID }),
+                      let resolved = BookSourceLibrary.catalog(for: item) as? IncrementalBookCatalog else {
+                    throw SourceError.unreachable
+                }
+                catalog = resolved
+                cachedCatalog = resolved
+                cachedCatalogSourceID = book.remoteSourceID
             }
             let body = try await catalog.fetchChapterText(url: chapters[index].url)
             if Task.isCancelled { return false }
@@ -856,6 +867,8 @@ struct ReaderScreen: View {
         stopCache()
         engine?.stopActivities()
         engine = nil
+        cachedCatalog = nil
+        cachedCatalogSourceID = nil
         openBook()
     }
 
