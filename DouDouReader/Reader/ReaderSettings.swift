@@ -129,6 +129,8 @@ final class ReaderSettingsStore {
     var autoInterval: Double = 8 { didSet { persist() } }
     var speechRate: Double = 0.48 { didSet { persist() } }
     var speechModeRaw: Int = 0 { didSet { persist() } }
+    /// 用户选择的朗读音色 identifier；空字符串表示系统默认 zh-CN。
+    var speechVoiceID: String = "" { didSet { persist() } }
     var sleepMinutes: Int = 0 { didSet { persist() } }
     var blockWords: String = "" { didSet { persist() } }
 
@@ -198,6 +200,7 @@ final class ReaderSettingsStore {
             autoInterval = stored.autoInterval
             speechRate = stored.speechRate
             speechModeRaw = stored.speechModeRaw
+            speechVoiceID = stored.speechVoiceID
             sleepMinutes = stored.sleepMinutes
             blockWords = stored.blockWords
         }
@@ -244,7 +247,7 @@ final class ReaderSettingsStore {
         horizontalMargin = min(56, max(12, horizontalMargin))
         brightness = min(1, max(0.45, brightness))
         autoInterval = min(30, max(3, autoInterval))
-        speechRate = min(0.62, max(0.32, speechRate))
+        speechRate = min(0.8, max(0.32, speechRate))
     }
 
     private func persist() {
@@ -284,6 +287,7 @@ final class ReaderSettingsStore {
         var autoInterval: Double
         var speechRate: Double
         var speechModeRaw: Int
+        var speechVoiceID: String
         var sleepMinutes: Int
         var blockWords: String
 
@@ -313,6 +317,7 @@ final class ReaderSettingsStore {
             autoInterval = store.autoInterval
             speechRate = store.speechRate
             speechModeRaw = store.speechModeRaw
+            speechVoiceID = store.speechVoiceID
             sleepMinutes = store.sleepMinutes
             blockWords = store.blockWords
         }
@@ -344,6 +349,7 @@ final class ReaderSettingsStore {
             autoInterval = try c.decodeIfPresent(Double.self, forKey: .autoInterval) ?? 8
             speechRate = try c.decodeIfPresent(Double.self, forKey: .speechRate) ?? 0.48
             speechModeRaw = try c.decodeIfPresent(Int.self, forKey: .speechModeRaw) ?? 0
+            speechVoiceID = try c.decodeIfPresent(String.self, forKey: .speechVoiceID) ?? ""
             sleepMinutes = try c.decodeIfPresent(Int.self, forKey: .sleepMinutes) ?? 0
             blockWords = try c.decodeIfPresent(String.self, forKey: .blockWords) ?? ""
         }

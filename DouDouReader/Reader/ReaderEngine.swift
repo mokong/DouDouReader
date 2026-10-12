@@ -767,6 +767,7 @@ final class ReaderEngine {
             parts: [text],
             mode: .page,
             rate: Float(settings.speechRate),
+            voiceID: settings.speechVoiceID,
             sleepMinutes: settings.sleepMinutes,
             highlight: true
         )
@@ -791,6 +792,7 @@ final class ReaderEngine {
             parts: [spoken],
             mode: .chapter,
             rate: Float(settings.speechRate),
+            voiceID: settings.speechVoiceID,
             sleepMinutes: settings.sleepMinutes,
             highlight: false
         )

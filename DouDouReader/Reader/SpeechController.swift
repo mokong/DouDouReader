@@ -11,6 +11,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     private var advance: Advance = .none
     private var deadline: Date?
     private var speakingRate: Float = AVSpeechUtteranceDefaultSpeechRate
+    private var speakingVoiceID: String = ""
     private var epoch = 0
 
     var isActive = false
@@ -29,13 +30,14 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         synthesizer.delegate = self
     }
 
-    func start(parts: [String], mode: SpeechReadMode, rate: Float, sleepMinutes: Int, highlight: Bool) {
+    func start(parts: [String], mode: SpeechReadMode, rate: Float, voiceID: String, sleepMinutes: Int, highlight: Bool) {
         stop()
         let pieces = parts.flatMap { chunk($0) }.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard let first = pieces.first else { return }
         queue = Array(pieces.dropFirst())
         advance = mode == .page ? .page : .chapter
         speakingRate = rate
+        speakingVoiceID = voiceID
         isActive = true
         isPaused = false
         if sleepMinutes > 0 {
@@ -72,7 +74,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
 
     private func speak(_ text: String) {
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+        utterance.voice = Self.resolveVoice(identifier: speakingVoiceID)
         utterance.rate = speakingRate
         objc_setAssociatedObject(
             utterance,
@@ -166,5 +168,20 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         }
         let step = advance
         onAdvance?(step)
+    }
+
+    /// 运行时枚举系统可用的中文音色（iOS/macOS/visionOS 列表不同），按名称排序。
+    static func chineseVoices() -> [AVSpeechSynthesisVoice] {
+        AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.hasPrefix("zh") }
+            .sorted { $0.name < $1.name }
+    }
+
+    /// 按用户选择的 identifier 解析音色；空 ID、不可用或列表为空时回落 zh-CN 默认语音。
+    static func resolveVoice(identifier: String) -> AVSpeechSynthesisVoice? {
+        if !identifier.isEmpty, let voice = AVSpeechSynthesisVoice(identifier: identifier) {
+            return voice
+        }
+        return AVSpeechSynthesisVoice(language: "zh-CN")
     }
 }

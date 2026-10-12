@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
@@ -13,6 +14,7 @@ struct SettingsPanel: View {
     @Environment(\.dismiss) private var dismiss
     @State private var importingFont = false
     @State private var fontMessage: String?
+    @State private var speechVoices = SpeechController.chineseVoices()
 
     var body: some View {
         NavigationStack {
@@ -94,7 +96,13 @@ struct SettingsPanel: View {
                     Toggle("全书进度", isOn: $settings.showBookPercent)
                 }
                 Section("朗读") {
-                    labeledSlider("语速", value: $settings.speechRate, range: 0.32...0.62, step: 0.01, text: String(format: "%.2f", settings.speechRate))
+                    labeledSlider("语速", value: $settings.speechRate, range: 0.32...0.8, step: 0.01, text: String(format: "%.2f", settings.speechRate))
+                    Picker("音色", selection: $settings.speechVoiceID) {
+                        Text("系统默认").tag("")
+                        ForEach(speechVoices, id: \.identifier) { voice in
+                            Text("\(voice.name)（\(voice.language)）").tag(voice.identifier)
+                        }
+                    }
                     choiceRow("方式") {
                         ChoiceButtons(
                             options: SpeechReadMode.allCases.map { ($0.title, $0) },
