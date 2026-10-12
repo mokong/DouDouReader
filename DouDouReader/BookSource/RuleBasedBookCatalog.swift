@@ -752,6 +752,7 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         var author: String
         var detail: String
         var summary: String
+        var cover: String
     }
 
     private func searchFieldSelectors() -> FieldSelectors {
@@ -760,7 +761,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             name: source.searchRule.nameSelector,
             author: source.searchRule.authorSelector,
             detail: source.searchRule.detailURLSelector,
-            summary: source.searchRule.summarySelector
+            summary: source.searchRule.summarySelector,
+            cover: source.searchRule.coverSelector
         )
     }
 
@@ -773,7 +775,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             name: pick(source.exploreRule.nameSelector, source.searchRule.nameSelector),
             author: pick(source.exploreRule.authorSelector, source.searchRule.authorSelector),
             detail: pick(source.exploreRule.detailURLSelector, source.searchRule.detailURLSelector),
-            summary: pick(source.exploreRule.summarySelector, source.searchRule.summarySelector)
+            summary: pick(source.exploreRule.summarySelector, source.searchRule.summarySelector),
+            cover: pick(source.exploreRule.coverSelector, source.searchRule.coverSelector)
         )
     }
 
@@ -806,6 +809,12 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             ).first
             let detailHref = node.nearestHref(preferred: queriedHref) ?? ""
 
+            let coverRaw = HTMLMiniParser.queryStrings(
+                root: node,
+                rule: selectors.cover.isEmpty ? "//img/@src" : selectors.cover
+            ).first ?? ""
+            let coverURL = (try? resolveURL(coverRaw, relativeTo: baseURL.absoluteString))?.absoluteString ?? ""
+
             guard !title.isEmpty, let resolvedDetailURL = resolveURL(detailHref, relativeTo: baseURL.absoluteString) else {
                 continue
             }
@@ -817,7 +826,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
                 id: resolvedDetailURL.absoluteString,
                 title: title,
                 author: author,
-                summary: summary
+                summary: summary,
+                coverURL: coverURL
             ))
         }
 
@@ -861,8 +871,9 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             let title = (item["title"] as? String) ?? (item["name"] as? String) ?? (item["bookName"] as? String) ?? "未命名"
             let author = (item["author"] as? String) ?? ""
             let summary = (item["summary"] as? String) ?? (item["desc"] as? String) ?? (item["intro"] as? String) ?? ""
+            let cover = (item["cover"] as? String) ?? (item["coverUrl"] as? String) ?? (item["coverURL"] as? String) ?? (item["img"] as? String) ?? (item["coverImage"] as? String) ?? ""
 
-            books.append(CatalogBook(id: id, title: title, author: author, summary: summary))
+            books.append(CatalogBook(id: id, title: title, author: author, summary: summary, coverURL: cover))
         }
 
         return books.isEmpty ? nil : books

@@ -382,7 +382,8 @@ struct BookSearchView: View {
                     sourceName: nil,
                     shelfBookID: nil,
                     sourceID: batch.sourceID,
-                    remoteBookID: book.id
+                    remoteBookID: book.id,
+                    coverURL: book.coverURL
                 )
             }
         }
@@ -416,7 +417,8 @@ struct BookSearchView: View {
                     sourceName: batch.sourceName,
                     shelfBookID: nil,
                     sourceID: batch.sourceID,
-                    remoteBookID: book.id
+                    remoteBookID: book.id,
+                    coverURL: book.coverURL
                 )
             }
         }
@@ -437,7 +439,7 @@ struct BookSearchView: View {
                 if let shelfID = row.shelfBookID, let book = books.first(where: { $0.id == shelfID }) {
                     BookCover(book: book, compact: true)
                 } else {
-                    SearchCover(title: row.title)
+                    SearchCover(title: row.title, coverURL: row.coverURL)
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(row.title.isEmpty ? "未命名" : row.title)
@@ -622,28 +624,46 @@ private struct SearchRow: Identifiable {
     var shelfBookID: UUID?
     var sourceID: String?
     var remoteBookID: String
+    var coverURL: String = ""
 }
 
 private struct SearchCover: View {
     var title: String
+    var coverURL: String
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color(hue: BookMetadata.coverHue(for: title), saturation: 0.45, brightness: 0.62))
-            LinearGradient(
-                colors: [.white.opacity(0.22), .clear, .black.opacity(0.18)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            Text(title.isEmpty ? "未命名" : title)
-                .font(.system(size: 8, weight: .semibold))
-                .foregroundStyle(.white)
-                .lineLimit(3)
-                .padding(4)
+            if let url = URL(string: coverURL) {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .empty:
+                        ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    case .failure:
+                        coverLabel
+                    case .success(let image):
+                        image.resizable().scaledToFill()
+                    @unknown default:
+                        coverLabel
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            } else {
+                coverLabel
+            }
         }
         .frame(width: 46, height: 66)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private var coverLabel: some View {
+        Text(title.isEmpty ? "未命名" : title)
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(.white)
+            .lineLimit(3)
+            .padding(4)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
     }
 }
 

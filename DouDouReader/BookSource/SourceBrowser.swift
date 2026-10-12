@@ -313,7 +313,8 @@ struct SourceBrowserView: View {
                         status: book.status.isEmpty ? "在线" : book.status,
                         summary: book.summary.isEmpty ? "点击阅读第一章。" : book.summary,
                         badge: badge,
-                        bookID: book.id
+                        bookID: book.id,
+                        coverURL: book.coverURL
                     )
                 }
                 if isDiscover {
@@ -382,7 +383,8 @@ struct SourceBrowserView: View {
         status: String,
         summary: String,
         badge: String,
-        bookID: String
+        bookID: String,
+        coverURL: String = ""
     ) -> some View {
         Button {
             Task { await openOrDownloadBook(title: title, author: author, bookID: bookID) }
@@ -393,7 +395,8 @@ struct SourceBrowserView: View {
                     title: title,
                     author: author,
                     badge: badge,
-                    category: category
+                    category: category,
+                    coverURL: coverURL
                 )
 
                 // 右侧信息区
@@ -884,6 +887,7 @@ struct NovelCoverView: View {
     var author: String
     var badge: String
     var category: String
+    var coverURL: String = ""
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -904,25 +908,19 @@ struct NovelCoverView: View {
                     }
                 )
                 .overlay(
-                    // 书名与作者排版
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(title)
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(.white)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .shadow(color: .black.opacity(0.7), radius: 2, x: 0, y: 1)
-                        Spacer()
-                        if !author.isEmpty {
-                            Text(author)
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundColor(Color.white.opacity(0.85))
-                                .lineLimit(1)
-                                .shadow(color: .black.opacity(0.6), radius: 1, x: 0, y: 1)
+                    Group {
+                        if let url = URL(string: coverURL) {
+                            AsyncImage(url: url) { phase in
+                                if let image = phase.image {
+                                    image.resizable().scaledToFill()
+                                } else {
+                                    titleOverlay
+                                }
+                            }
+                        } else {
+                            titleOverlay
                         }
                     }
-                    .padding(6)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 )
 
             // 右上角红底白字小角标（如 "10万"、"完本"、"精选"）
@@ -939,6 +937,27 @@ struct NovelCoverView: View {
         }
         .frame(width: 68, height: 92)
         .shadow(color: .black.opacity(0.4), radius: 3, x: 0, y: 2)
+    }
+
+    private var titleOverlay: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(.white)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .shadow(color: .black.opacity(0.7), radius: 2, x: 0, y: 1)
+            Spacer()
+            if !author.isEmpty {
+                Text(author)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(Color.white.opacity(0.85))
+                    .lineLimit(1)
+                    .shadow(color: .black.opacity(0.6), radius: 1, x: 0, y: 1)
+            }
+        }
+        .padding(6)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func gradientForCategory(_ cat: String) -> LinearGradient {

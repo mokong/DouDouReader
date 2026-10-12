@@ -41,6 +41,8 @@ nonisolated struct CatalogBook: Identifiable, Equatable, Sendable {
     var summary: String
     var category: String = ""
     var status: String = ""
+    /// 封面图地址（来自 coverSelector），为空时由 UI 用色块占位。
+    var coverURL: String = ""
 }
 
 nonisolated enum SourceError: LocalizedError, Equatable {
