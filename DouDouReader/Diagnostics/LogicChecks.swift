@@ -47,6 +47,7 @@ enum LogicChecks {
         checkSourceSwitchHits(&errors)
         checkXBS(&errors)
         checkBookUpdateComparison(&errors)
+        checkReaderTapZones(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -2368,8 +2369,7 @@ enum LogicChecks {
     }
 
     /// 书架检查更新的目录比较：新增章节数、最新章变化、空目录、源删章兜底。
-    private static func checkBookUpdateComparison(_ errors: inout [String]) {
-        let one = [RemoteChapterRef(title: "第1章", url: "/c1")]
+    private static func checkBookUpdateComparison(_ errors: inout [String]) {        let one = [RemoteChapterRef(title: "第1章", url: "/c1")]
         let two = [
             RemoteChapterRef(title: "第1章", url: "/c1"),
             RemoteChapterRef(title: "第2章", url: "/c2")
@@ -2404,5 +2404,36 @@ enum LogicChecks {
         // 远端比本地少章（源删章）：不计数为新章节。
         let shrunk = BookUpdateComparison.compare(local: two, remote: one)
         if shrunk.newChapterCount != 0 { errors.append("检查更新: 源删章不应计为新章节 \(shrunk)") }
+    }
+
+    /// 极简模式与正常模式的点按区域：边缘翻页、中间唤出，边界不重叠。
+    private static func checkReaderTapZones(_ errors: inout [String]) {
+        // 正常模式：左 30% 翻上一页，右 30% 翻下一页，中间唤出工具栏。
+        if ReaderEngine.tapAction(xFraction: 0.05, simpleMode: false) != .prevPage {
+            errors.append("点按区域: 正常模式左侧应翻上一页")
+        }
+        if ReaderEngine.tapAction(xFraction: 0.50, simpleMode: false) != .toggleChrome {
+            errors.append("点按区域: 正常模式中间应唤出工具栏")
+        }
+        if ReaderEngine.tapAction(xFraction: 0.95, simpleMode: false) != .nextPage {
+            errors.append("点按区域: 正常模式右侧应翻下一页")
+        }
+        // 极简模式：左右各 12% 边缘翻页，其余全部唤出。
+        if ReaderEngine.tapAction(xFraction: 0.05, simpleMode: true) != .prevPage {
+            errors.append("点按区域: 极简模式左边缘应翻上一页")
+        }
+        if ReaderEngine.tapAction(xFraction: 0.95, simpleMode: true) != .nextPage {
+            errors.append("点按区域: 极简模式右边缘应翻下一页")
+        }
+        if ReaderEngine.tapAction(xFraction: 0.50, simpleMode: true) != .toggleChrome {
+            errors.append("点按区域: 极简模式中间应唤出工具栏")
+        }
+        // 边界本身（0.12 / 0.88）不算边缘翻页，避免与唤出区域冲突。
+        if ReaderEngine.tapAction(xFraction: 0.12, simpleMode: true) != .toggleChrome {
+            errors.append("点按区域: 极简模式 12% 边界应属唤出区")
+        }
+        if ReaderEngine.tapAction(xFraction: 0.88, simpleMode: true) != .toggleChrome {
+            errors.append("点按区域: 极简模式 88% 边界应属唤出区")
+        }
     }
 }

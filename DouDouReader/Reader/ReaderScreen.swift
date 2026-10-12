@@ -37,6 +37,7 @@ struct ReaderScreen: View {
     @State private var chapterMoveError: String?
     @State private var chapterMoveGeneration = 0
     @State private var showSearch = false
+    @State private var searchInitialQuery = ""
     @State private var showBookmarks = false
     @State private var showSettings = false
     @State private var padTop = ScreenSafeArea.windowInsets.top
@@ -160,7 +161,7 @@ struct ReaderScreen: View {
             }
         }
         .sheet(isPresented: $showSearch) {
-            SearchSheet(engine: engine) { offset in
+            SearchSheet(engine: engine, initialQuery: searchInitialQuery) { offset in
                 engine.seek(to: offset)
                 showSearch = false
                 engine.showsChrome = false
@@ -210,7 +211,17 @@ struct ReaderScreen: View {
         #if os(iOS) || os(visionOS)
         ReaderContainer(engine: engine, settings: settings, theme: theme, safeTop: safeTop, safeBottom: safeBottom)
         #else
-        MacPageView(engine: engine, settings: settings, theme: theme, safeTop: safeTop, safeBottom: safeBottom)
+        MacPageView(
+            engine: engine,
+            settings: settings,
+            theme: theme,
+            safeTop: safeTop,
+            safeBottom: safeBottom,
+            onSearchSelectedText: { query in
+                searchInitialQuery = query
+                showSearch = true
+            }
+        )
         #endif
     }
 
@@ -222,7 +233,8 @@ struct ReaderScreen: View {
         safeBottom: CGFloat
     ) -> some View {
         VStack(spacing: 0) {
-            if settings.showsHeader {
+            // 极简模式：连页眉页脚这些常驻文字一起隐藏，只留正文。
+            if settings.showsHeader && !settings.simpleMode {
                 HStack(spacing: 8) {
                     if settings.showTime {
                         TimelineView(.periodic(from: .now, by: 30)) { timeline in
@@ -245,7 +257,7 @@ struct ReaderScreen: View {
                 .padding(.top, safeTop + 8)
             }
             Spacer()
-            if settings.showsFooter {
+            if settings.showsFooter && !settings.simpleMode {
                 HStack {
                     if settings.showPageProgress {
                         Text(engine.pageLabel)
@@ -376,8 +388,15 @@ struct ReaderScreen: View {
 
     private func moreMenu(_ engine: ReaderEngine) -> some View {
         Menu {
-            Button("搜索") { showSearch = true }
+            Button("搜索") {
+                searchInitialQuery = ""
+                showSearch = true
+            }
             Button("书签") { showBookmarks = true }
+            Button(settings.simpleMode ? "退出极简模式" : "极简模式") {
+                settings.simpleMode.toggle()
+                engine.showsChrome = false
+            }
             if canSwitchSource {
                 Button("换源") {
                     presentSourceSwitch(preferring: engine.currentChapter?.title ?? book.currentChapterTitle)
@@ -1029,12 +1048,90 @@ private struct SafeAreaProbe: UIViewRepresentable {
 #if os(macOS)
 import AppKit
 
+/// 阅读页正文：可拖拽选中文本（NSTextView），单击（无拖拽）走点按区域，
+/// 右键菜单带「搜索选中词」。
+final class SelectablePageTextView: NSTextView {
+    var onSimpleTap: ((CGPoint) -> Void)?
+    var onSearchText: ((String) -> Void)?
+    private var downPoint: CGPoint?
+
+    override func mouseDown(with event: NSEvent) {
+        downPoint = convert(event.locationInWindow, from: nil)
+        super.mouseDown(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        defer { downPoint = nil }
+        guard let start = downPoint else { return }
+        let end = convert(event.locationInWindow, from: nil)
+        let moved = abs(start.x - end.x) + abs(start.y - end.y)
+        // 没有拖拽且没有形成选区：视为单击，交给阅读页点按区域（翻页/唤出）。
+        if moved < 4, selectedRange().length == 0 {
+            onSimpleTap?(end)
+        }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        guard selectedRange().length > 0 else { return menu }
+        let raw = (string as NSString).substring(with: selectedRange())
+        let selected = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.isEmpty else { return menu }
+        let title = selected.count > 12 ? String(selected.prefix(12)) + "…" : selected
+        let item = NSMenuItem(title: "搜索「\(title)」", action: #selector(fireSearch(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = selected
+        menu.insertItem(item, at: 0)
+        if menu.item(at: 1) != nil {
+            menu.insertItem(NSMenuItem.separator(), at: 1)
+        }
+        return menu
+    }
+
+    @objc private func fireSearch(_ sender: NSMenuItem) {
+        guard let text = sender.representedObject as? String else { return }
+        onSearchText?(text)
+    }
+}
+
+struct SelectablePageView: NSViewRepresentable {
+    var attributed: NSAttributedString
+    var onTapXFraction: (CGFloat) -> Void
+    var onSearchText: (String) -> Void
+
+    func makeNSView(context: Context) -> SelectablePageTextView {
+        let textView = SelectablePageTextView()
+        textView.isSelectable = true
+        textView.isEditable = false
+        textView.drawsBackground = false
+        textView.textContainerInset = .zero
+        textView.textContainer?.widthTracksTextView = true
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width, .height]
+        textView.onSearchText = onSearchText
+        return textView
+    }
+
+    func updateNSView(_ nsView: SelectablePageTextView, context: Context) {
+        if !(nsView.attributedString().isEqual(to: attributed)) {
+            nsView.textStorage?.setAttributedString(attributed)
+        }
+        nsView.onSimpleTap = { point in
+            onTapXFraction(point.x / max(nsView.bounds.width, 1))
+        }
+        nsView.onSearchText = onSearchText
+    }
+}
+
 struct MacPageView: View {
     var engine: ReaderEngine
     var settings: ReaderSettingsStore
     var theme: ReadingTheme
     var safeTop: CGFloat
     var safeBottom: CGFloat
+    var onSearchSelectedText: (String) -> Void
 
     var body: some View {
         GeometryReader { proxy in
@@ -1056,7 +1153,7 @@ struct MacPageView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { location in
-                engine.handleTap(xFraction: location.x / max(proxy.size.width, 1))
+                applyTap(xFraction: location.x / max(proxy.size.width, 1))
             }
             .onAppear { engine.setPageSize(placement.pageSize) }
             .onChange(of: placement.pageSize) { _, newSize in
@@ -1071,6 +1168,25 @@ struct MacPageView: View {
         .onKeyPress(.rightArrow) {
             engine.go(delta: 1)
             return .handled
+        }
+    }
+
+    /// 正常模式：左 30% 上一页 / 右 30% 下一页 / 中间唤出工具栏（沿用 handleTap）。
+    /// 极简模式：左右各 12% 边缘翻页，其余全部区域点按唤出/收起，避免与翻页冲突。
+    private func applyTap(xFraction: CGFloat) {
+        if engine.autoRunning {
+            engine.stopAuto()
+            engine.showsChrome = true
+            return
+        }
+        guard settings.simpleMode else {
+            engine.handleTap(xFraction: xFraction)
+            return
+        }
+        switch ReaderEngine.tapAction(xFraction: xFraction, simpleMode: true) {
+        case .prevPage: engine.go(delta: -1)
+        case .nextPage: engine.go(delta: 1)
+        case .toggleChrome: engine.showsChrome.toggle()
         }
     }
 
@@ -1090,8 +1206,13 @@ struct MacPageView: View {
             .foregroundStyle(theme.text.color)
         } else if let layout = engine.layout(for: engine.position.chapterIndex),
                   layout.characterRanges.indices.contains(engine.position.pageIndex) {
-            Text(attributedPage(layout, page: engine.position.pageIndex))
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            SelectablePageView(
+                attributed: NSAttributedString(attributedPage(layout, page: engine.position.pageIndex)),
+                onTapXFraction: { xf in
+                    applyTap(xFraction: xf)
+                },
+                onSearchText: onSearchSelectedText
+            )
         } else {
             Color.clear
         }

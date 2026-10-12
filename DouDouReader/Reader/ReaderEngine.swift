@@ -309,6 +309,23 @@ final class ReaderEngine {
         }
     }
 
+    /// 点按区域判定（纯函数）：正常模式左右各 30% 翻页、中间唤出工具栏；
+    /// 极简模式收窄为左右各 12% 边缘翻页，其余全部区域唤出/收起，避免与翻页冲突。
+    enum TapAction {
+        case prevPage, nextPage, toggleChrome
+    }
+
+    nonisolated static func tapAction(xFraction: CGFloat, simpleMode: Bool) -> TapAction {
+        if simpleMode {
+            if xFraction < 0.12 { return .prevPage }
+            if xFraction > 0.88 { return .nextPage }
+            return .toggleChrome
+        }
+        if xFraction < 0.30 { return .prevPage }
+        if xFraction > 0.70 { return .nextPage }
+        return .toggleChrome
+    }
+
     func toggleSpeech() {
         if speech.isActive {
             haltSpeech()

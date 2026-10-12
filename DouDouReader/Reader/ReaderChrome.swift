@@ -355,7 +355,15 @@ struct CatalogSheet: View {
 struct SearchSheet: View {
     var engine: ReaderEngine
     var onPick: (Int) -> Void
-    @State private var query = ""
+    var initialQuery: String = ""
+    @State private var query: String
+
+    init(engine: ReaderEngine, initialQuery: String = "", onPick: @escaping (Int) -> Void) {
+        self.engine = engine
+        self.initialQuery = initialQuery
+        self.onPick = onPick
+        _query = State(initialValue: initialQuery)
+    }
 
     var body: some View {
         NavigationStack {
