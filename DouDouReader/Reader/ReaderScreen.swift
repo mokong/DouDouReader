@@ -23,6 +23,8 @@ struct ReaderScreen: View {
     /// 打开书时解析一次的目录执行器，翻章复用；换源（remoteSourceID 变化）时自动重建。
     @State private var cachedCatalog: IncrementalBookCatalog?
     @State private var cachedCatalogSourceID: String?
+    /// 已静默预取到的远端章节 index，避免重复预取。
+    @State private var prefetchedUpTo: Int = -1
     @State private var showSourceSwitch = false
     @State private var switchChapterTitle = ""
     @State private var showCache = false
@@ -326,6 +328,7 @@ struct ReaderScreen: View {
         .onChange(of: engine.position) { _, _ in
             guard !scrubbingChapter else { return }
             chapterScrub = Double(scrubIndex(engine))
+            prefetchNextChapterIfNeeded(engine: engine)
         }
     }
 
@@ -691,6 +694,26 @@ struct ReaderScreen: View {
         _ = await loadRemoteChapter(book.loadedChapterCount, into: engine, jumpAfter: false, generation: nil)
     }
 
+    /// 距本章末尾约 2 页（或本章仅 1 页）时，后台静默预取下一章，失败不打扰阅读。
+    private func prefetchNextChapterIfNeeded(engine: ReaderEngine) {
+        guard !book.remoteBookID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let chapterIndex = engine.position.chapterIndex
+        guard let layout = engine.layout(for: chapterIndex) else { return }
+        let totalPages = layout.characterRanges.count
+        let page = engine.position.pageIndex
+        let nearEnd = totalPages <= 1 || page >= totalPages - 2
+        guard nearEnd else { return }
+        let nextIndex = chapterIndex + 1
+        guard nextIndex > prefetchedUpTo else { return }
+        guard !engine.chapters.contains(where: { $0.remoteIndex == nextIndex }) else { return }
+        let remoteList = RemoteChapterList.decode(book.remoteChapterList)
+        guard remoteList.indices.contains(nextIndex) else { return }
+        prefetchedUpTo = nextIndex
+        Task {
+            _ = await loadRemoteChapter(nextIndex, into: engine, jumpAfter: false, generation: nil, reportFailure: false)
+        }
+    }
+
     /// 只下载目录里的这一章。目录跳转和章节交界共用，避免同时抓同一章。
     /// reportFailure 为 false 时只给缓存用：失败不把当前页标成加载失败，也不写目录错误。
     private func loadRemoteChapter(
@@ -869,6 +892,7 @@ struct ReaderScreen: View {
         engine = nil
         cachedCatalog = nil
         cachedCatalogSourceID = nil
+        prefetchedUpTo = -1
         openBook()
     }
 
