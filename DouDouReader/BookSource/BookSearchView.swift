@@ -16,6 +16,7 @@ struct BookSearchView: View {
     @State private var searching = false
     @State private var searchGeneration = 0
     @State private var searchTask: Task<Void, Never>?
+    @State private var debounceTask: Task<Void, Never>?
     @State private var addingID: String?
     @State private var status = ""
     @State private var errorText: String?
@@ -81,8 +82,20 @@ struct BookSearchView: View {
             history = BookSearchHistory.load()
         }
         .onChange(of: query) { _, newValue in
-            guard newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, didSearch else { return }
-            stopSearch()
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                debounceTask?.cancel()
+                guard didSearch else { return }
+                stopSearch()
+                return
+            }
+            // 输入停顿约 500ms 自动搜索；回车仍立即触发 startSearch。
+            debounceTask?.cancel()
+            debounceTask = Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                if Task.isCancelled { return }
+                startSearch()
+            }
         }
         .task {
             try? await Task.sleep(for: .milliseconds(350))
@@ -92,6 +105,7 @@ struct BookSearchView: View {
         }
         .onDisappear {
             searchTask?.cancel()
+            debounceTask?.cancel()
         }
     }
 
