@@ -1065,6 +1065,10 @@ struct SourceManagerView: View {
                                     } label: { Label("测试搜索", systemImage: "waveform.magnifyingglass") }
                                     Button { editingRecord = source } label: { Label("编辑规则", systemImage: "pencil") }
                                     Button { detailRecord = source } label: { Label("查看详情", systemImage: "doc.text") }
+                                    Button {
+                                        copyToClipboard(source.rawJSON)
+                                        errorText = "已复制该源 JSON 到剪贴板"
+                                    } label: { Label("复制 JSON", systemImage: "doc.on.doc") }
                                 } label: {
                                     if testingID == source.id {
                                         ProgressView().controlSize(.small)
@@ -1083,7 +1087,14 @@ struct SourceManagerView: View {
                     .onDelete(perform: delete)
                 }
             } header: {
-                Text("已添加的书源 (\(sources.count))")
+                HStack {
+                    Text("已添加的书源 (\(sources.count))")
+                    Spacer()
+                    if !sources.isEmpty {
+                        Button("导出全部") { exportAll() }
+                            .font(.footnote)
+                    }
+                }
             }
         }
         .navigationTitle("书源管理")
@@ -1212,6 +1223,33 @@ struct SourceManagerView: View {
         } catch {
             errorText = error.localizedDescription
         }
+    }
+
+    /// 复制文本到系统剪贴板。
+    private func copyToClipboard(_ text: String) {
+        #if os(iOS) || os(visionOS)
+        UIPasteboard.general.string = text
+        #elseif os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #endif
+    }
+
+    /// 批量导出所有书源为 JSON 数组并复制到剪贴板。
+    private func exportAll() {
+        let objects: [Any] = sources.compactMap { record in
+            guard let data = record.rawJSON.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) else { return nil }
+            return json
+        }
+        guard JSONSerialization.isValidJSONObject(objects),
+              let data = try? JSONSerialization.data(withJSONObject: objects, options: [.prettyPrinted]),
+              let text = String(data: data, encoding: .utf8) else {
+            errorText = "没有可导出的书源 JSON"
+            return
+        }
+        copyToClipboard(text)
+        errorText = "已导出 \(objects.count) 个书源到剪贴板"
     }
 
     /// 跑一次该源的搜索，展示结果摘要或错误。
