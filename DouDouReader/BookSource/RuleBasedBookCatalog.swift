@@ -75,19 +75,32 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
 
     func fetchText(bookID: String, progress: (@Sendable (Int, Int) -> Void)?) async throws -> (title: String, text: String) {
         let prepared = try await prepare(bookID: bookID)
-        var assembledChapters: [(title: String, content: String)] = []
-        var totalBytes = 0
-        for (index, item) in prepared.chapters.enumerated() {
-            progress?(index + 1, prepared.chapters.count)
-            let rawContent = try await downloadChapter(item.url)
-            totalBytes += rawContent.utf8.count
-            if totalBytes > BookStorage.byteLimit {
-                throw ImportError.tooLarge
+        let count = prepared.chapters.count
+        // 约 4 路并发下载；字节累计用 actor 保证线程安全。
+        let semaphore = DispatchSemaphore(value: 4)
+        let counter = ByteCounter()
+        let collected = try await withThrowingTaskGroup(of: (Int, String).self) { group -> [(Int, String)] in
+            for (index, item) in prepared.chapters.enumerated() {
+                group.addTask {
+                    semaphore.wait()
+                    defer { semaphore.signal() }
+                    let content = try await downloadChapter(item.url)
+                    try await counter.add(content.utf8.count)
+                    return (index, content)
+                }
             }
-            assembledChapters.append((item.title, rawContent))
+            var results: [(Int, String)] = []
+            var done = 0
+            for try await entry in group {
+                results.append(entry)
+                done += 1
+                progress?(done, count)
+            }
+            return results
         }
-        let fullText = CatalogText.assemble(author: prepared.author, chapters: assembledChapters)
-        guard assembledChapters.contains(where: { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+        let ordered = collected.sorted { $0.0 < $1.0 }.map { (prepared.chapters[$0.0].title, $0.1) }
+        let fullText = CatalogText.assemble(author: prepared.author, chapters: ordered)
+        guard ordered.contains(where: { !$1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw SourceError.emptyBook
         }
         return (prepared.title, fullText)
@@ -853,5 +866,17 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         }
 
         return books.isEmpty ? nil : books
+    }
+}
+
+/// 并发整本下载时线程安全地累计字节数，超过 40MB 上限即抛错。
+private actor ByteCounter {
+    private var total = 0
+
+    func add(_ bytes: Int) throws {
+        total += bytes
+        if total > BookStorage.byteLimit {
+            throw ImportError.tooLarge
+        }
     }
 }
