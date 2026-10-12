@@ -41,6 +41,7 @@ enum LogicChecks {
         checkSources(&errors)
         checkTransportPolicy(&errors)
         checkBookSourceParsing(&errors)
+        checkRuleEngineRegression(&errors)
         checkEpub(&errors)
         checkBookSearch(&errors)
         checkSourceSwitchHits(&errors)
@@ -2259,5 +2260,43 @@ enum LogicChecks {
             index = next
         }
         return data
+    }
+
+    /// L2：代表性 HTML 回归样本，一次性覆盖 @js: 字面量、XPath 谓词、CSS 子选择器、@css: 前缀、|| 语义。
+    private static func checkRuleEngineRegression(_ errors: inout [String]) {
+        let html = """
+        <html><body>
+        <div class="list">
+          <div class="item hot" data-id="1"><a href="/book/1">第一本</a><img src="/c1.jpg"><span class="author">作者甲</span></div>
+          <div class="item" data-id="2"><a href="/book/2">第二本</a><img src="/c2.jpg"><span class="author">作者乙</span></div>
+          <div class="item" data-id="3"><a href="/book/3">第三本</a><img src="/c3.jpg"><span class="author">作者丙</span></div>
+        </div>
+        </body></html>
+        """
+        let root = HTMLMiniParser.parse(html)
+
+        // CSS 子选择器 >：div.list > div.item 应命中 3 个。
+        let direct = HTMLMiniParser.queryNodes(root: root, rule: "div.list > div.item")
+        if direct.count != 3 { errors.append("回归: CSS > 直接子选择器应命中 3，实际 \(direct.count)") }
+
+        // XPath contains 谓词：class 含 hot 的应命中 1。
+        let hot = HTMLMiniParser.queryNodes(root: root, rule: "//div[contains(@class,'hot')]")
+        if hot.count != 1 { errors.append("回归: contains 谓词应命中 1，实际 \(hot.count)") }
+
+        // last() 谓词：应取到第三本。
+        let last = HTMLMiniParser.queryStrings(root: root, rule: "//div[@class='item'][last()]/a/text()")
+        if last.first != "第三本" { errors.append("回归: last() 谓词应取第三本，实际 \(last.first ?? "nil")") }
+
+        // @css: 前缀 + @属性：应正确取到封面地址而不把 css:.list 当属性。
+        let cover = HTMLMiniParser.queryStrings(root: root, rule: "@css:div.item > img@src")
+        if cover.first != "/c1.jpg" { errors.append("回归: @css: 前缀 img@src 应取 /c1.jpg，实际 \(cover.first ?? "nil")") }
+
+        // || 回退：第一个选择器无命中时回退到第二个。
+        let fallback = HTMLMiniParser.queryStrings(root: root, rule: "//div[@class='missing']/text() || //div[contains(@class,'hot')]/a/text()")
+        if fallback.first != "第一本" { errors.append("回归: || 应回退到首个非空分组，实际 \(fallback.first ?? "nil")") }
+
+        // @js: return 字面量提取。
+        let jsLit = HTMLMiniParser.queryStrings(root: root, rule: "@js:return 'https://example.com/api'")
+        if jsLit.first != "https://example.com/api" { errors.append("回归: @js: return 字面量提取不符，实际 \(jsLit.first ?? "nil")") }
     }
 }
