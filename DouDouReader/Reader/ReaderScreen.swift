@@ -30,6 +30,7 @@ struct ReaderScreen: View {
     @State private var showCache = false
     @State private var cacheRunning = false
     @State private var cacheStatus = ""
+    @State private var cacheFraction: Double = 0
     @State private var cacheGeneration = 0
     @State private var cacheTask: Task<Void, Never>?
     @State private var chapterScrub = 0.0
@@ -182,6 +183,7 @@ struct ReaderScreen: View {
                 downloaded: engine.chapters.count,
                 total: max(engine.remoteChapterCount, engine.chapters.count),
                 running: cacheRunning,
+                fraction: cacheFraction,
                 status: cacheStatus,
                 canCache: engine.remoteChapterCount > 0,
                 onStart: { startCache(engine) },
@@ -536,31 +538,51 @@ struct ReaderScreen: View {
         cacheGeneration += 1
         let generation = cacheGeneration
         cacheRunning = true
-        cacheStatus = ""
-        let start = scrubIndex(engine)
+        let total = engine.remoteChapterCount
+        let cached = Set(engine.chapters.map(\.remoteIndex))
+        let pending = BookCachePlan.pendingIndices(total: total, downloaded: cached)
+        let walker = CacheIndexWalker(pending)
+        let cachedCount = total - pending.count
+        cacheFraction = total > 0 ? Double(cachedCount) / Double(total) : 0
+        cacheStatus = "已缓存 \(cachedCount) / \(total) 章"
         cacheTask = Task { @MainActor in
-            let total = engine.remoteChapterCount
-            for index in start..<total {
-                if Task.isCancelled || generation != cacheGeneration { return }
-                if engine.chapters.contains(where: { $0.remoteIndex == index }) { continue }
-                cacheStatus = "正在缓存 \(self.chapterTitle(at: index, engine: engine))"
-                let ok = await self.loadRemoteChapter(
-                    index,
-                    into: engine,
-                    jumpAfter: false,
-                    generation: nil,
-                    reportFailure: false
-                )
-                if Task.isCancelled || generation != cacheGeneration { return }
-                if !ok {
-                    self.cacheStatus = "缓存中断"
-                    self.cacheRunning = false
-                    return
+            var done = cachedCount
+            await withTaskGroup(of: Int?.self) { group in
+                for _ in 0..<4 {
+                    group.addTask { [walker] in
+                        while !Task.isCancelled {
+                            guard let index = await walker.next() else { return nil }
+                            let ok = await self.loadRemoteChapter(
+                                index,
+                                into: engine,
+                                jumpAfter: false,
+                                generation: nil,
+                                reportFailure: false,
+                                allowConcurrent: true
+                            )
+                            if Task.isCancelled { return nil }
+                            return ok ? index : -1
+                        }
+                        return nil
+                    }
+                }
+                for await result in group {
+                    guard !Task.isCancelled, generation == self.cacheGeneration else { break }
+                    guard let result else { continue }
+                    if result < 0 {
+                        group.cancelAll()
+                        self.cacheRunning = false
+                        self.cacheStatus = "有章节下载失败，已停止"
+                        return
+                    }
+                    done += 1
+                    self.cacheFraction = total > 0 ? Double(done) / Double(total) : 0
+                    self.cacheStatus = "已缓存 \(done) / \(total) 章"
                 }
             }
-            guard generation == cacheGeneration else { return }
+            guard generation == self.cacheGeneration else { return }
             self.cacheRunning = false
-            self.cacheStatus = "已缓存到结尾"
+            self.cacheStatus = self.cacheFraction >= 1 ? "全本缓存完成" : "缓存已停止"
         }
     }
 
@@ -739,33 +761,41 @@ struct ReaderScreen: View {
 
     /// 只下载目录里的这一章。目录跳转和章节交界共用，避免同时抓同一章。
     /// reportFailure 为 false 时只给缓存用：失败不把当前页标成加载失败，也不写目录错误。
+    /// allowConcurrent 为 true 时（全本缓存多 worker）跳过全书串行闸门，网络层并发落盘仍走逐章 upsert。
     private func loadRemoteChapter(
         _ index: Int,
         into engine: ReaderEngine,
         jumpAfter: Bool,
         generation: Int? = nil,
-        reportFailure: Bool = true
+        reportFailure: Bool = true,
+        allowConcurrent: Bool = false
     ) async -> Bool {
         let ticket = readerGeneration
         if engine.chapters.contains(where: { $0.remoteIndex == index }) {
             if jumpAfter { engine.jumpToRemote(index) }
             return true
         }
-        while chapterFetchInFlight {
-            if Task.isCancelled { return false }
-            if readerGeneration != ticket {
-                if reportFailure { engine.noteNextChapterFailed() }
-                return false
+        if !allowConcurrent {
+            while chapterFetchInFlight {
+                if Task.isCancelled { return false }
+                if readerGeneration != ticket {
+                    if reportFailure { engine.noteNextChapterFailed() }
+                    return false
+                }
+                if let generation, generation != catalogGeneration { return false }
+                try? await Task.sleep(nanoseconds: 40_000_000)
             }
-            if let generation, generation != catalogGeneration { return false }
-            try? await Task.sleep(nanoseconds: 40_000_000)
         }
         if engine.chapters.contains(where: { $0.remoteIndex == index }) {
             if jumpAfter { engine.jumpToRemote(index) }
             return true
         }
-        chapterFetchInFlight = true
-        defer { chapterFetchInFlight = false }
+        if !allowConcurrent {
+            chapterFetchInFlight = true
+        }
+        defer {
+            if !allowConcurrent { chapterFetchInFlight = false }
+        }
         if readerGeneration != ticket {
             if reportFailure { engine.noteNextChapterFailed() }
             return false
@@ -985,6 +1015,16 @@ struct ReaderScreen: View {
         #else
         return "—"
         #endif
+    }
+}
+
+/// 全本缓存多 worker 共享的下标队列：4 路并发从这里领取待下载章节。
+private actor CacheIndexWalker {
+    private var pending: [Int]
+    init(_ items: [Int]) { pending = items }
+    func next() -> Int? {
+        guard !pending.isEmpty else { return nil }
+        return pending.removeFirst()
     }
 }
 

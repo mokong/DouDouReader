@@ -124,6 +124,7 @@ struct BookshelfView: View {
     @State private var didOpenSample = false
     @State private var checkingUpdates = false
     @State private var updatingBookIDs: Set<UUID> = []
+    @State private var showCacheManage = false
 
     private var sort: ShelfSort { ShelfSort(rawValue: sortRaw) ?? .recent }
     private var showsGrid: Bool { layoutRaw != "list" }
@@ -212,6 +213,9 @@ struct BookshelfView: View {
             Button("取消", role: .cancel) { pendingDelete = nil }
         } message: {
             Text(pendingDelete.map { "《\($0.title)》会从书架和本地文件里删除。" } ?? "")
+        }
+        .sheet(isPresented: $showCacheManage) {
+            CacheManageSheet()
         }
         .task {
             if ProcessInfo.processInfo.arguments.contains("-openSearch") {
@@ -385,6 +389,11 @@ struct BookshelfView: View {
                 Label(showsGrid ? "列表" : "封面", systemImage: showsGrid ? "list.bullet" : "square.grid.2x2")
             }
             Divider()
+            Button {
+                showCacheManage = true
+            } label: {
+                Label("缓存管理", systemImage: "internaldrive")
+            }
             Button {
                 Task { await checkAllUpdates() }
             } label: {
@@ -668,5 +677,96 @@ struct BookCover: View {
         }
         .frame(width: width, height: height)
         .shadow(color: .black.opacity(0.14), radius: 6, y: 3)
+    }
+}
+
+/// 全局缓存管理：列出有章节缓存的在线书，显示占用与章数，按书清理或全部清理。
+struct CacheManageSheet: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    @Query private var books: [BookRecord]
+    @State private var sizes: [UUID: Int64] = [:]
+    @State private var totalSize: Int64 = 0
+
+    private var cachedBooks: [BookRecord] {
+        books
+            .filter { !$0.remoteBookID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .filter { StoredChapters.hasCache(fileName: $0.fileName) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("总占用 \(ByteFormat.string(totalSize))") {
+                    if cachedBooks.isEmpty {
+                        Text("还没有章节缓存")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(cachedBooks) { book in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(book.title)
+                                        .font(.headline)
+                                    Text("\(ByteFormat.string(sizes[book.id] ?? 0)) · 已缓存 \(book.loadedChapterCount) 章")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("清理") { clear(book) }
+                                    .tint(.red)
+                            }
+                        }
+                    }
+                }
+                if !cachedBooks.isEmpty {
+                    Section {
+                        Button("清理全部章节缓存", role: .destructive) { clearAll() }
+                    } footer: {
+                        Text("只删除已下载的章节正文，书架记录与整本 txt 保留。")
+                    }
+                }
+            }
+            .navigationTitle("缓存管理")
+            #if os(iOS) || os(visionOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                Button("完成") { dismiss() }
+            }
+            .onAppear(perform: reload)
+        }
+    }
+
+    private func reload() {
+        let snapshot = books.map { ($0.id, $0.fileName) }
+        Task.detached(priority: .utility) {
+            var map: [UUID: Int64] = [:]
+            var total: Int64 = 0
+            for (id, fileName) in snapshot {
+                let size = StoredChapters.cacheSize(fileName: fileName)
+                map[id] = size
+                total += size
+            }
+            await MainActor.run {
+                sizes = map
+                totalSize = total
+            }
+        }
+    }
+
+    private func clear(_ book: BookRecord) {
+        StoredChapters.delete(fileName: book.fileName)
+        book.loadedChapterCount = 0
+        try? modelContext.save()
+        reload()
+    }
+
+    private func clearAll() {
+        for book in cachedBooks {
+            StoredChapters.delete(fileName: book.fileName)
+            book.loadedChapterCount = 0
+        }
+        try? modelContext.save()
+        reload()
     }
 }

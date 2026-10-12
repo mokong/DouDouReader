@@ -48,6 +48,7 @@ enum LogicChecks {
         checkXBS(&errors)
         checkBookUpdateComparison(&errors)
         checkReaderTapZones(&errors)
+        checkBookCachePlan(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -2435,5 +2436,27 @@ enum LogicChecks {
         if ReaderEngine.tapAction(xFraction: 0.88, simpleMode: true) != .toggleChrome {
             errors.append("点按区域: 极简模式 88% 边界应属唤出区")
         }
+    }
+
+    /// 全本缓存计划：断点续下跳过已落盘章节；字节格式化。
+    private static func checkBookCachePlan(_ errors: inout [String]) {
+        // 总 10 章、已落盘 0、1：待下载 2..<10。
+        let pending = BookCachePlan.pendingIndices(total: 10, downloaded: [0, 1])
+        if pending != [2, 3, 4, 5, 6, 7, 8, 9] {
+            errors.append("缓存计划: 跳过已落盘章节不符 \(pending)")
+        }
+        // 全部已落盘：待下载为空。
+        let empty = BookCachePlan.pendingIndices(total: 3, downloaded: [0, 1, 2])
+        if !empty.isEmpty { errors.append("缓存计划: 全已落盘应无待下载 \(empty)") }
+        // 空目录：待下载为空。
+        let none = BookCachePlan.pendingIndices(total: 0, downloaded: [])
+        if !none.isEmpty { errors.append("缓存计划: 空目录应无待下载") }
+        // 落盘集合含总章数之外的下标（换源残留）：不应崩，只取总章数内。
+        let stale = BookCachePlan.pendingIndices(total: 2, downloaded: [0, 55])
+        if stale != [1] { errors.append("缓存计划: 换源残留下标处理不符 \(stale)") }
+
+        if ByteFormat.string(512) != "512 B" { errors.append("字节格式化: B 级不符 \(ByteFormat.string(512))") }
+        if ByteFormat.string(2048) != "2.0 KB" { errors.append("字节格式化: KB 级不符 \(ByteFormat.string(2048))") }
+        if !ByteFormat.string(5 * 1024 * 1024).hasSuffix("MB") { errors.append("字节格式化: MB 级不符 \(ByteFormat.string(5 * 1024 * 1024))") }
     }
 }

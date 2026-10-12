@@ -247,6 +247,27 @@ nonisolated enum StoredChapters {
         FileManager.default.fileExists(atPath: chapDir(fileName).appendingPathComponent("index.jsonl").path)
     }
 
+    /// 缓存目录是否存在且非空（有 index.jsonl）。
+    nonisolated static func hasCache(fileName: String) -> Bool {
+        persistedIndexExists(fileName: fileName)
+    }
+
+    /// 整个缓存目录的字节数（index.jsonl + bodies/），用于全局缓存管理的占用统计。
+    nonisolated static func cacheSize(fileName: String) -> Int64 {
+        let dir = chapDir(fileName)
+        guard let enumerator = FileManager.default.enumerator(
+            at: dir,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let item as URL in enumerator {
+            let values = try? item.resourceValues(forKeys: [.fileSizeKey])
+            total += Int64(values?.fileSize ?? 0)
+        }
+        return total
+    }
+
     /// 旧书只有连续的前几章正文，没有分章记录。按拆出来的章节当成 0、1、2… 记下。
     static func migrated(from text: String, fallbackTitle: String) -> [StoredChapter] {
         let slices = ChapterSplitter.split(text, fallbackTitle: fallbackTitle)

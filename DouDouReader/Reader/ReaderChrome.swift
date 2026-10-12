@@ -468,6 +468,7 @@ struct CacheSheet: View {
     var downloaded: Int
     var total: Int
     var running: Bool
+    var fraction: Double
     var status: String
     var canCache: Bool
     var onStart: () -> Void
@@ -479,6 +480,9 @@ struct CacheSheet: View {
             VStack(spacing: 16) {
                 if canCache {
                     Text("已下载 \(downloaded) / \(total) 章")
+                    if total > 0 {
+                        ProgressView(value: min(max(fraction, 0), 1))
+                    }
                     if !status.isEmpty {
                         Text(status)
                             .font(.caption)
@@ -486,9 +490,9 @@ struct CacheSheet: View {
                             .multilineTextAlignment(.center)
                     }
                     if running {
-                        Button("停止", action: onStop)
+                        Button("停止", role: .destructive, action: onStop)
                     } else {
-                        Button("从本章缓存到结尾", action: onStart)
+                        Button("一键缓存全本", action: onStart)
                             .buttonStyle(.borderedProminent)
                     }
                 } else {
