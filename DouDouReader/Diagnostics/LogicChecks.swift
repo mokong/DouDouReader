@@ -49,6 +49,7 @@ enum LogicChecks {
         checkBookUpdateComparison(&errors)
         checkReaderTapZones(&errors)
         checkBookCachePlan(&errors)
+        checkSpeechEntry(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -2458,5 +2459,15 @@ enum LogicChecks {
         if ByteFormat.string(512) != "512 B" { errors.append("字节格式化: B 级不符 \(ByteFormat.string(512))") }
         if ByteFormat.string(2048) != "2.0 KB" { errors.append("字节格式化: KB 级不符 \(ByteFormat.string(2048))") }
         if !ByteFormat.string(5 * 1024 * 1024).hasSuffix("MB") { errors.append("字节格式化: MB 级不符 \(ByteFormat.string(5 * 1024 * 1024))") }
+    }
+
+    /// 工具栏听书入口状态切换：未朗读点一次直接开始，朗读中展开控制菜单。
+    private static func checkSpeechEntry(_ errors: inout [String]) {
+        if ReaderEngine.speechEntryAction(isActive: false) != .startDirect {
+            errors.append("听书入口: 未朗读应点一次直接开始")
+        }
+        if ReaderEngine.speechEntryAction(isActive: true) != .openControls {
+            errors.append("听书入口: 朗读中应展开控制菜单")
+        }
     }
 }

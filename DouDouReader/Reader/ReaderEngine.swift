@@ -326,6 +326,13 @@ final class ReaderEngine {
         return .toggleChrome
     }
 
+    /// 工具栏听书入口的点击行为（纯函数）：未朗读=点一次直接开始；朗读中=展开控制菜单。
+    enum SpeechEntryAction { case startDirect, openControls }
+
+    nonisolated static func speechEntryAction(isActive: Bool) -> SpeechEntryAction {
+        isActive ? .openControls : .startDirect
+    }
+
     func toggleSpeech() {
         if speech.isActive {
             haltSpeech()

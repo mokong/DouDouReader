@@ -427,24 +427,35 @@ struct ReaderScreen: View {
     }
 
     private func listenMenu(_ engine: ReaderEngine) -> some View {
-        Menu {
-            if engine.speech.isActive {
-                Button(engine.speech.isPaused ? "继续朗读" : "暂停朗读") {
-                    engine.speech.togglePause()
-                }
-                Button("停止朗读") {
+        Group {
+            switch ReaderEngine.speechEntryAction(isActive: engine.speech.isActive) {
+            case .startDirect:
+                // 未朗读：点一次图标直接从当前界面开始，不再展开菜单。
+                Button {
                     engine.toggleSpeech()
+                } label: {
+                    Image(systemName: listenSymbol(engine))
+                        .frame(width: 36, height: 36)
                 }
-            } else {
-                Button("朗读") {
-                    engine.toggleSpeech()
+                .buttonStyle(.plain)
+            case .openControls:
+                // 朗读中：保留控制菜单（暂停/继续、停止）。
+                Menu {
+                    if engine.speech.isPaused {
+                        Button("继续朗读") { engine.speech.togglePause() }
+                    } else {
+                        Button("暂停朗读") { engine.speech.togglePause() }
+                    }
+                    Button("停止朗读") {
+                        engine.toggleSpeech()
+                    }
+                } label: {
+                    Image(systemName: listenSymbol(engine))
+                        .frame(width: 36, height: 36)
                 }
+                .buttonStyle(.plain)
             }
-        } label: {
-            Image(systemName: listenSymbol(engine))
-                .frame(width: 36, height: 36)
         }
-        .buttonStyle(.plain)
         .accessibilityLabel(listenTitle(engine))
     }
 
