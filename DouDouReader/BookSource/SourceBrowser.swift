@@ -1303,7 +1303,7 @@ struct SourceImportSheet: View {
             VStack(spacing: 0) {
                 if previewSources.isEmpty {
                     Picker("导入方式", selection: $mode) {
-                        Text("精选推荐 (10)").tag(0)
+                        Text("精选推荐 (\(PresetBookSources.all.count))").tag(0)
                         Text("粘贴书源").tag(1)
                         Text("网络链接").tag(2)
                     }
