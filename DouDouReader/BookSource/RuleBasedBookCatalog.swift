@@ -156,10 +156,12 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         let detailHtml = decode(detailData, response: detailResponse)
         let detailRoot = HTMLMiniParser.parse(detailHtml)
 
-        let title = HTMLMiniParser.queryStrings(root: detailRoot, rule: "//h1/text()").first
+        let titleRule = source.tocRule.infoNameSelector.isEmpty ? "//h1/text()" : source.tocRule.infoNameSelector
+        let title = HTMLMiniParser.queryStrings(root: detailRoot, rule: titleRule).first
             ?? HTMLMiniParser.queryStrings(root: detailRoot, rule: "title").first
             ?? "未知书名"
-        let author = HTMLMiniParser.queryStrings(root: detailRoot, rule: "//span[@class='author']/text()").first ?? ""
+        let authorRule = source.tocRule.infoAuthorSelector.isEmpty ? "//span[@class='author']/text()" : source.tocRule.infoAuthorSelector
+        let author = HTMLMiniParser.queryStrings(root: detailRoot, rule: authorRule).first ?? ""
         let chapters = try await loadChapterList(bookURL: bookURL, detailRoot: detailRoot)
         guard !chapters.isEmpty else { throw SourceError.emptyBook }
         return PreparedBook(title: title, author: author, chapters: chapters)

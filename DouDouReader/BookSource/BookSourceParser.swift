@@ -178,6 +178,8 @@ enum BookSourceParser {
         var tocRule = SourceTocRule()
         if let ruleBookInfo = dict["ruleBookInfo"] as? [String: Any] {
             tocRule.tocURLSelector = (ruleBookInfo["tocUrl"] as? String) ?? ""
+            tocRule.infoNameSelector = (ruleBookInfo["name"] as? String) ?? ""
+            tocRule.infoAuthorSelector = (ruleBookInfo["author"] as? String) ?? ""
         }
         if let ruleToc = dict["ruleToc"] as? [String: Any] {
             tocRule.listSelector = ruleToc["chapterList"] as? String ?? ""

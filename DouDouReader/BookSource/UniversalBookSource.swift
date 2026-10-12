@@ -201,23 +201,32 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
     var urlSelector: String = ""
     /// 目录最前面是最新章节横幅时，从第一次出现的第1章接着读，并把横幅里多出来的章补到末尾。
     var startAtFirstChapter: Bool = false
+    /// 详情页书名选择器（来自 ruleBookInfo.name），为空时回退硬编码 //h1。
+    var infoNameSelector: String = ""
+    /// 详情页作者选择器（来自 ruleBookInfo.author），为空时回退硬编码 //span[@class='author']。
+    var infoAuthorSelector: String = ""
 
     nonisolated init(
         tocURLSelector: String = "",
         listSelector: String = "",
         nameSelector: String = "",
         urlSelector: String = "",
-        startAtFirstChapter: Bool = false
+        startAtFirstChapter: Bool = false,
+        infoNameSelector: String = "",
+        infoAuthorSelector: String = ""
     ) {
         self.tocURLSelector = tocURLSelector
         self.listSelector = listSelector
         self.nameSelector = nameSelector
         self.urlSelector = urlSelector
         self.startAtFirstChapter = startAtFirstChapter
+        self.infoNameSelector = infoNameSelector
+        self.infoAuthorSelector = infoAuthorSelector
     }
 
     private enum CodingKeys: String, CodingKey {
         case tocURLSelector, listSelector, nameSelector, urlSelector, startAtFirstChapter
+        case infoNameSelector, infoAuthorSelector
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -227,6 +236,8 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         nameSelector = try container.decodeIfPresent(String.self, forKey: .nameSelector) ?? ""
         urlSelector = try container.decodeIfPresent(String.self, forKey: .urlSelector) ?? ""
         startAtFirstChapter = try container.decodeIfPresent(Bool.self, forKey: .startAtFirstChapter) ?? false
+        infoNameSelector = try container.decodeIfPresent(String.self, forKey: .infoNameSelector) ?? ""
+        infoAuthorSelector = try container.decodeIfPresent(String.self, forKey: .infoAuthorSelector) ?? ""
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -236,6 +247,8 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         try container.encode(nameSelector, forKey: .nameSelector)
         try container.encode(urlSelector, forKey: .urlSelector)
         try container.encode(startAtFirstChapter, forKey: .startAtFirstChapter)
+        try container.encode(infoNameSelector, forKey: .infoNameSelector)
+        try container.encode(infoAuthorSelector, forKey: .infoAuthorSelector)
     }
 }
 
