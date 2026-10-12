@@ -26,6 +26,9 @@ struct SourceBrowserView: View {
     @State private var searching = false
     @State private var discoverLoading = false
     @State private var discoverGeneration = 0
+    @State private var discoverPage = 1
+    @State private var loadingMore = false
+    @State private var hasMoreDiscover = false
     @State private var addingID: String?
     @State private var status = ""
     @State private var errorText: String?
@@ -289,7 +292,7 @@ struct SourceBrowserView: View {
                 detail: "可点顶部书源名称，切换其他已启用书源"
             )
         } else if !discoverBooks.isEmpty {
-            bookList(discoverBooks, badge: currentChannel?.title ?? "发现")
+            bookList(discoverBooks, badge: currentChannel?.title ?? "发现", isDiscover: true)
         } else {
             messageView(
                 symbol: "books.vertical",
@@ -299,7 +302,7 @@ struct SourceBrowserView: View {
         }
     }
 
-    private func bookList(_ books: [CatalogBook], badge: String) -> some View {
+    private func bookList(_ books: [CatalogBook], badge: String, isDiscover: Bool = false) -> some View {
         ScrollView {
             LazyVStack(spacing: 16) {
                 ForEach(books) { book in
@@ -313,9 +316,40 @@ struct SourceBrowserView: View {
                         bookID: book.id
                     )
                 }
+                if isDiscover {
+                    loadMoreFooter
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
+        }
+    }
+
+    @ViewBuilder
+    private var loadMoreFooter: some View {
+        if hasMoreDiscover {
+            Button {
+                Task { await loadMoreDiscover() }
+            } label: {
+                HStack {
+                    if loadingMore {
+                        ProgressView().tint(Color.cyan)
+                    }
+                    Text(loadingMore ? "正在加载下一页..." : "加载更多")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Color(red: 0.2, green: 0.6, blue: 1.0))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+            .disabled(loadingMore)
+        } else {
+            Text("已经到底啦")
+                .font(.system(size: 12))
+                .foregroundColor(Color.white.opacity(0.35))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
         }
     }
 
@@ -484,6 +518,8 @@ struct SourceBrowserView: View {
     private func loadDiscover() async {
         discoverGeneration += 1
         let generation = discoverGeneration
+        discoverPage = 1
+        hasMoreDiscover = false
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard needle.isEmpty else { return }
 
@@ -524,6 +560,7 @@ struct SourceBrowserView: View {
             )
             guard generation == discoverGeneration else { return }
             discoverBooks = books
+            hasMoreDiscover = !books.isEmpty
             if books.isEmpty {
                 discoverError = "\(entry.name) 的「\(channel.title)」没有解析到书籍。"
             }
@@ -531,6 +568,35 @@ struct SourceBrowserView: View {
             guard generation == discoverGeneration else { return }
             discoverBooks = []
             discoverError = error.localizedDescription
+        }
+    }
+
+    /// 列表底部「加载更多」：追加下一页并按 book.id 去重。
+    private func loadMoreDiscover() async {
+        guard !discoverLoading, !loadingMore, hasMoreDiscover,
+              let entry = selectedEntry, let channel = currentChannel, let catalog = ruleCatalog else {
+            return
+        }
+        let generation = discoverGeneration
+        let nextPage = discoverPage + 1
+        loadingMore = true
+        defer { loadingMore = false }
+        do {
+            let books = try await catalog.explore(
+                channelURL: channel.urlTemplate,
+                selections: selectionsForLoad(),
+                page: nextPage
+            )
+            guard generation == discoverGeneration else { return }
+            var seen = Set(discoverBooks.map(\.id))
+            for book in books where seen.insert(book.id).inserted {
+                discoverBooks.append(book)
+            }
+            discoverPage = nextPage
+            hasMoreDiscover = !books.isEmpty
+        } catch {
+            // 翻页失败不打断已加载列表，仅停止继续加载。
+            hasMoreDiscover = false
         }
     }
 
