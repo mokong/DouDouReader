@@ -988,6 +988,12 @@ struct SourceManagerView: View {
     @State private var showingImportSheet = false
     @State private var importSheetMode = 0
     @State private var updatingID: UUID?
+    // P2-12：测试 / 编辑规则 / 详情
+    @State private var testingID: UUID?
+    @State private var testResult: String?
+    @State private var testAlert = false
+    @State private var editingRecord: SourceRecord?
+    @State private var detailRecord: SourceRecord?
 
     var body: some View {
         List {
@@ -1056,6 +1062,22 @@ struct SourceManagerView: View {
                                 }
                                 Toggle("", isOn: Bindable(source).enabled)
                                     .labelsHidden()
+                                Menu {
+                                    Button {
+                                        testingID = source.id
+                                        Task { await testSource(source: source) }
+                                    } label: { Label("测试搜索", systemImage: "waveform.magnifyingglass") }
+                                    Button { editingRecord = source } label: { Label("编辑规则", systemImage: "pencil") }
+                                    Button { detailRecord = source } label: { Label("查看详情", systemImage: "doc.text") }
+                                } label: {
+                                    if testingID == source.id {
+                                        ProgressView().controlSize(.small)
+                                    } else {
+                                        Image(systemName: "ellipsis.circle")
+                                    }
+                                }
+                                .menuStyle(.borderlessButton)
+                                .fixedSize()
                             }
                             Text(source.baseURL)
                                 .font(.caption)
@@ -1078,6 +1100,25 @@ struct SourceManagerView: View {
             Button("好", role: .cancel) {}
         } message: {
             Text(errorText ?? "")
+        }
+        .alert("测试结果", isPresented: $testAlert) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(testResult ?? "")
+        }
+        .sheet(item: $editingRecord) { record in
+            if let decoded = try? BookSourceParser.decodeSingleSource(json: record.rawJSON) {
+                EditSourceSheet(source: decoded) { edited in
+                    record.name = edited.name
+                    record.rawJSON = (try? BookSourceParser.encode(source: edited)) ?? record.rawJSON
+                    try? modelContext.save()
+                }
+            } else {
+                Text("该源不是可编辑的规则书源。").padding()
+            }
+        }
+        .sheet(item: $detailRecord) { record in
+            SourceDetailSheet(record: record)
         }
     }
 
@@ -1175,6 +1216,29 @@ struct SourceManagerView: View {
         } catch {
             errorText = error.localizedDescription
         }
+    }
+
+    /// 跑一次该源的搜索，展示结果摘要或错误。
+    private func testSource(source: SourceRecord) async {
+        defer { testingID = nil }
+        do {
+            guard let decoded = try? BookSourceParser.decodeSingleSource(json: source.rawJSON) else {
+                testResult = "该源为标准接口或无法解析 rawJSON，无需规则测试。"
+                testAlert = true
+                return
+            }
+            let catalog = RuleBasedBookCatalog(recordID: source.id.uuidString, source: decoded)
+            let results = try await catalog.search(query: "斗破")
+            if results.isEmpty {
+                testResult = "已请求并解析，但没有命中任何结果（检查搜索列表选择器）。"
+            } else {
+                let first = results[0]
+                testResult = "成功，返回 \(results.count) 本。示例：《\(first.title)》\(first.author)"
+            }
+        } catch {
+            testResult = "测试失败：\(error.localizedDescription)"
+        }
+        testAlert = true
     }
 }
 
@@ -1487,6 +1551,140 @@ struct SourceImportSheet: View {
             selectedIDs = Set(parsed.map(\.id))
         } catch {
             errorText = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - 规则编辑与详情（P2-12）
+
+/// 编辑规则书源的关键选择器字段，保存时经 BookSourceParser.encode 回写 rawJSON。
+struct EditSourceSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let source: UniversalBookSource
+    let onSave: (UniversalBookSource) -> Void
+
+    @State private var name: String
+    @State private var searchURL: String
+    @State private var searchList: String
+    @State private var searchName: String
+    @State private var searchAuthor: String
+    @State private var searchDetail: String
+    @State private var tocList: String
+    @State private var tocName: String
+    @State private var tocURL: String
+    @State private var contentSelector: String
+
+    init(source: UniversalBookSource, onSave: @escaping (UniversalBookSource) -> Void) {
+        self.source = source
+        self.onSave = onSave
+        _name = State(initialValue: source.name)
+        _searchURL = State(initialValue: source.searchRule.urlTemplate)
+        _searchList = State(initialValue: source.searchRule.listSelector)
+        _searchName = State(initialValue: source.searchRule.nameSelector)
+        _searchAuthor = State(initialValue: source.searchRule.authorSelector)
+        _searchDetail = State(initialValue: source.searchRule.detailURLSelector)
+        _tocList = State(initialValue: source.tocRule.listSelector)
+        _tocName = State(initialValue: source.tocRule.nameSelector)
+        _tocURL = State(initialValue: source.tocRule.urlSelector)
+        _contentSelector = State(initialValue: source.contentRule.contentSelector)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("基本") {
+                    TextField("名称", text: $name)
+                }
+                Section("搜索规则") {
+                    field("搜索地址模板", $searchURL)
+                    field("列表选择器", $searchList)
+                    field("书名选择器", $searchName)
+                    field("作者选择器", $searchAuthor)
+                    field("详情地址选择器", $searchDetail)
+                }
+                Section("目录规则") {
+                    field("章节列表选择器", $tocList)
+                    field("章节名选择器", $tocName)
+                    field("章节地址选择器", $tocURL)
+                }
+                Section("正文规则") {
+                    field("正文选择器", $contentSelector)
+                }
+            }
+            .navigationTitle("编辑规则")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { save() }
+                }
+            }
+        }
+        .frame(minWidth: 420, minHeight: 520)
+    }
+
+    private func field(_ title: String, _ text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            TextField("", text: text, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+        }
+    }
+
+    private func save() {
+        var edited = source
+        edited.name = name
+        edited.searchRule.urlTemplate = searchURL
+        edited.searchRule.listSelector = searchList
+        edited.searchRule.nameSelector = searchName
+        edited.searchRule.authorSelector = searchAuthor
+        edited.searchRule.detailURLSelector = searchDetail
+        edited.tocRule.listSelector = tocList
+        edited.tocRule.nameSelector = tocName
+        edited.tocRule.urlSelector = tocURL
+        edited.contentRule.contentSelector = contentSelector
+        onSave(edited)
+        dismiss()
+    }
+}
+
+/// 只读展示书源解析后的规则摘要与原始 JSON。
+struct SourceDetailSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let record: SourceRecord
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let s = try? BookSourceParser.decodeSingleSource(json: record.rawJSON) {
+                        detailRow("名称", s.name)
+                        detailRow("类型", s.kind.displayName)
+                        detailRow("地址", s.sourceURL)
+                        detailRow("搜索列表", s.searchRule.listSelector)
+                        detailRow("目录列表", s.tocRule.listSelector)
+                        detailRow("正文", s.contentRule.contentSelector)
+                    }
+                    Text("原始 JSON").font(.headline)
+                    Text(record.rawJSON)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding()
+            }
+            .navigationTitle("规则详情")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+            }
+        }
+        .frame(minWidth: 440, minHeight: 520)
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value.isEmpty ? "（空）" : value).font(.system(.callout, design: .monospaced))
         }
     }
 }
