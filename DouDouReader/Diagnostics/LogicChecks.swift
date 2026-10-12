@@ -778,6 +778,24 @@ enum LogicChecks {
             errors.append("@js: 后缀附加在选择器后未保留选择器结果：\(withSelector ?? "nil")")
         }
 
+        // 3.6 XPath 函数谓词：contains / starts-with / text()= / last()
+        let containsNodes = HTMLMiniParser.queryNodes(root: dom, rule: "//li[contains(@class,'book-item')]")
+        if containsNodes.count != 2 {
+            errors.append("contains 谓词匹配数量不为 2：\(containsNodes.count)")
+        }
+        let startsNodes = HTMLMiniParser.queryStrings(root: dom, rule: "//a[starts-with(@href,'/book/1')]/@text")
+        if startsNodes.first != "海边的 & 灯塔" {
+            errors.append("starts-with 谓词匹配不符：\(startsNodes.first ?? "nil")")
+        }
+        let textEqNodes = HTMLMiniParser.queryNodes(root: dom, rule: "//a[text()='第二本书']")
+        if textEqNodes.count != 1 {
+            errors.append("text()= 谓词匹配数量不为 1：\(textEqNodes.count)")
+        }
+        let lastNodes = HTMLMiniParser.queryNodes(root: dom, rule: "//li[last()]")
+        if lastNodes.count != 1 || lastNodes[0].allText.contains("灯塔") {
+            errors.append("last() 谓词未取到最后一个 li")
+        }
+
         // 4. 测试 RuleBasedBookCatalog 端到端链路与网络模拟
         switch finishAsync({ try await probeRuleCatalog() }) {
         case .failure(let error):

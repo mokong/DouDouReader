@@ -533,6 +533,18 @@ nonisolated enum HTMLMiniParser {
         return currentNodes
     }
 
+    /// XPath 函数谓词，如 [contains(@class,'x')]、[starts-with(@href,'/book')]、[text()='甲']、[last()]
+    private enum StepPredicateKind: Equatable {
+        case contains(attr: String, value: String)
+        case startsWith(attr: String, value: String)
+        case textEquals(value: String)
+        case isLast
+    }
+
+    private struct StepPredicate {
+        var kind: StepPredicateKind
+    }
+
     private struct SelectorStep {
         var isDeep: Bool          // 是否递归查找后代 (// 或 CSS 空格)
         var tag: String?          // 标签名
@@ -541,6 +553,7 @@ nonisolated enum HTMLMiniParser {
         var attrKey: String?      // 属性名
         var attrValue: String?    // 属性值
         var index: Int?           // 索引 [0]
+        var predicates: [StepPredicate] = []
     }
 
     private static func parseSelectorSteps(_ selector: String) -> [SelectorStep] {
@@ -609,6 +622,42 @@ nonisolated enum HTMLMiniParser {
             part.removeSubrange(indexRange)
         }
 
+        // 解析 XPath 函数谓词 [contains(@a,'v')]、[starts-with(@a,'v')]、[text()='x']、[last()]
+        var scanned = ""
+        var cursor = part.startIndex
+        while cursor < part.endIndex {
+            if part[cursor] == "[" {
+                // 收集匹配的整段方括号（支持 contains(...) 这类嵌套括号）
+                var depth = 0
+                var content = ""
+                var j = cursor
+                var closed = false
+                while j < part.endIndex {
+                    let cj = part[j]
+                    if cj == "[" {
+                        depth += 1
+                        if depth > 1 { content.append(cj) }
+                    } else if cj == "]" {
+                        depth -= 1
+                        if depth == 0 { closed = true; break } else { content.append(cj) }
+                    } else {
+                        content.append(cj)
+                    }
+                    j = part.index(after: j)
+                }
+                if let fn = parseFunctionPredicate(content) {
+                    step.predicates.append(fn)
+                } else {
+                    scanned += "[\(content)]"
+                }
+                cursor = closed ? part.index(j, offsetBy: 1) : part.endIndex
+            } else {
+                scanned.append(part[cursor])
+                cursor = part.index(after: cursor)
+            }
+        }
+        part = scanned
+
         // 解析 XPath 属性判断 [@class='xxx'] 或 [@id='xxx'] 或 [@attr='xxx']
         if let attrRange = part.range(of: #"\[@([a-zA-Z0-9_\-]+)\s*=\s*['"]?([^'"]+)['"]?\]"#, options: .regularExpression) {
             let matched = String(part[attrRange])
@@ -655,6 +704,57 @@ nonisolated enum HTMLMiniParser {
         return step
     }
 
+    /// 解析方括号内的函数谓词内容；不认识时返回 nil（保留给既有属性/索引逻辑）。
+    private static func parseFunctionPredicate(_ innerRaw: String) -> StepPredicate? {
+        let inner = innerRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if inner == "last()" || inner == "position()=last()" {
+            return StepPredicate(kind: .isLast)
+        }
+        func capture(_ pattern: String, _ transform: (String, String) -> StepPredicateKind) -> StepPredicate? {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let m = regex.firstMatch(in: inner, range: NSRange(inner.startIndex..., in: inner)),
+                  m.numberOfRanges >= 3 else { return nil }
+            let attr = (inner as NSString).substring(with: m.range(at: 1))
+            let val = (inner as NSString).substring(with: m.range(at: 2))
+            return StepPredicate(kind: transform(attr, val))
+        }
+        if let p = capture(#"contains\(\s*@([a-zA-Z0-9_\-]+)\s*,\s*['"]([^'"]*)['"]\s*\)"#, { .contains(attr: $0, value: $1) }) {
+            return p
+        }
+        if let p = capture(#"starts-with\(\s*@([a-zA-Z0-9_\-]+)\s*,\s*['"]([^'"]*)['"]\s*\)"#, { .startsWith(attr: $0, value: $1) }) {
+            return p
+        }
+        if let regex = try? NSRegularExpression(pattern: #"text\(\)\s*=\s*['"]([^'"]*)['"]"#),
+           let m = regex.firstMatch(in: inner, range: NSRange(inner.startIndex..., in: inner)) {
+            let val = (inner as NSString).substring(with: m.range(at: 1))
+            return StepPredicate(kind: .textEquals(value: val))
+        }
+        return nil
+    }
+
+    /// 谓词求值。attr 为 text/text() 时取节点文本，否则取属性值。
+    private static func predicateMatches(_ kind: StepPredicateKind, _ candidate: HTMLNode) -> Bool {
+        func rawValue(_ attr: String) -> String? {
+            let key = attr.lowercased()
+            if key == "text" || key == "text()" {
+                return candidate.allText
+            }
+            return candidate.get(attr: key)
+        }
+        switch kind {
+        case .contains(let attr, let value):
+            guard let raw = rawValue(attr) else { return false }
+            return raw.contains(value)
+        case .startsWith(let attr, let value):
+            guard let raw = rawValue(attr) else { return false }
+            return raw.hasPrefix(value)
+        case .textEquals(let value):
+            return candidate.allText == value
+        case .isLast:
+            return true // 由 matchStep 统一取最后一个
+        }
+    }
+
     private static func matchStep(node: HTMLNode, step: SelectorStep) -> [HTMLNode] {
         var pool: [HTMLNode] = []
         if step.isDeep {
@@ -684,7 +784,16 @@ nonisolated enum HTMLMiniParser {
                     return false
                 }
             }
+            for predicate in step.predicates where predicate.kind != .isLast {
+                if !predicateMatches(predicate.kind, candidate) { return false }
+            }
             return true
+        }
+
+        // [last()] 只保留最后一个命中节点。
+        if step.predicates.contains(where: { $0.kind == .isLast }) {
+            guard let last = matched.last else { return [] }
+            matched = [last]
         }
 
         if let index = step.index {
