@@ -7,7 +7,17 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
     var source: UniversalBookSource
     var session: URLSession
 
-    init(recordID: String, source: UniversalBookSource, session: URLSession = .shared) {
+    /// 带 URLCache 与共享 Cookie 存储的默认会话，避免每次请求都新建连接、丢失会话 Cookie。
+    nonisolated static let configuredSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.urlCache = URLCache(memoryCapacity: 20 * 1024 * 1024, diskCapacity: 0)
+        config.httpCookieStorage = HTTPCookieStorage.shared
+        config.httpShouldSetCookies = true
+        config.requestCachePolicy = .useProtocolCachePolicy
+        return URLSession(configuration: config)
+    }()
+
+    init(recordID: String, source: UniversalBookSource, session: URLSession = RuleBasedBookCatalog.configuredSession) {
         self.id = recordID
         self.name = source.name
         self.source = source
@@ -335,59 +345,71 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
     }
 
     private func loadData(request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let data: Data
-        let response: URLResponse
-        let host = request.url?.host ?? "书源服务器"
-
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch let err as SourceError {
-            throw err
-        } catch let urlError as URLError {
-            switch urlError.code {
-            case .timedOut:
-                throw SourceError.detailedUnreachable("连接超时（\(host) 响应超时，请检查网络或稍后重试）")
-            case .cannotFindHost:
-                throw SourceError.detailedUnreachable("找不到主机域名（\(host) DNS 解析失败，可能域名已失效或被封禁）")
-            case .cannotConnectToHost:
-                throw SourceError.detailedUnreachable("无法连接到服务器（\(host) 拒绝连接或站点已停机维护）")
-            case .networkConnectionLost:
-                throw SourceError.detailedUnreachable("网络连接意外中断，请重试")
-            case .notConnectedToInternet:
-                throw SourceError.detailedUnreachable("当前设备未连接互联网，请检查 Wi-Fi 或蜂窝网络设置")
-            case .secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid:
-                throw SourceError.detailedUnreachable("SSL 证书安全校验未通过（\(host) 证书可能已过期或不安全）")
-            case .appTransportSecurityRequiresSecureConnection:
-                throw SourceError.detailedUnreachable("系统安全策略拦截(ATS)：书源站点使用未加密 HTTP，已被系统拦截")
-            default:
-                throw SourceError.detailedUnreachable("网络请求失败: \(urlError.localizedDescription)")
+        // 对超时、连接中断、5xx 做 1 次退避重试。
+        for attempt in 0...1 {
+            do {
+                let (data, http) = try await performLoad(request: request)
+                if (500...599).contains(http.statusCode) {
+                    if attempt == 0 {
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                        continue
+                    }
+                    throw SourceError.detailedBadResponse("HTTP \(http.statusCode)（书源服务器发生内部故障）")
+                }
+                return (data, http)
+            } catch let error as URLError {
+                if (error.code == .timedOut || error.code == .networkConnectionLost), attempt == 0 {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    continue
+                }
+                throw mapURLError(error)
             }
-        } catch {
-            throw SourceError.detailedUnreachable("连接书源失败: \(error.localizedDescription)")
         }
+        throw SourceError.badResponse
+    }
 
+    /// 单次网络请求。404/403/非 2xx 直接抛 SourceError；5xx 正常返回，由 loadData 决定是否重试。
+    private func performLoad(request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw SourceError.badResponse
         }
-
         if http.statusCode == 404 {
             throw SourceError.notFound
         }
-
         if http.statusCode == 403 {
             throw SourceError.detailedBadResponse("HTTP 403 Forbidden（书源站点启用了反爬保护或 Cloudflare 防护，已拦截请求）")
         }
-
-        if (500...599).contains(http.statusCode) {
-            throw SourceError.detailedBadResponse("HTTP \(http.statusCode)（书源服务器发生内部故障）")
-        }
-
-        guard (200..<300).contains(http.statusCode) else {
+        if !(200..<300).contains(http.statusCode) && !(500...599).contains(http.statusCode) {
             throw SourceError.detailedBadResponse("HTTP 状态码 \(http.statusCode)")
         }
-
         return (data, http)
     }
+
+    private func mapURLError(_ urlError: URLError) -> SourceError {
+        let host = urlError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String
+            ?? requestHostFallback
+        switch urlError.code {
+        case .timedOut:
+            return SourceError.detailedUnreachable("连接超时（\(host) 响应超时，请检查网络或稍后重试）")
+        case .cannotFindHost:
+            return SourceError.detailedUnreachable("找不到主机域名（\(host) DNS 解析失败，可能域名已失效或被封禁）")
+        case .cannotConnectToHost:
+            return SourceError.detailedUnreachable("无法连接到服务器（\(host) 拒绝连接或站点已停机维护）")
+        case .networkConnectionLost:
+            return SourceError.detailedUnreachable("网络连接意外中断，请重试")
+        case .notConnectedToInternet:
+            return SourceError.detailedUnreachable("当前设备未连接互联网，请检查 Wi-Fi 或蜂窝网络设置")
+        case .secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid:
+            return SourceError.detailedUnreachable("SSL 证书安全校验未通过（\(host) 证书可能已过期或不安全）")
+        case .appTransportSecurityRequiresSecureConnection:
+            return SourceError.detailedUnreachable("系统安全策略拦截(ATS)：书源站点使用未加密 HTTP，已被系统拦截")
+        default:
+            return SourceError.detailedUnreachable("网络请求失败: \(urlError.localizedDescription)")
+        }
+    }
+
+    private var requestHostFallback: String { "书源服务器" }
 
     // MARK: - 辅助方法
 
