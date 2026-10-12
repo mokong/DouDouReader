@@ -71,6 +71,8 @@ nonisolated final class HTMLNode: @unchecked Sendable {
 nonisolated enum HTMLMiniParser {
     // MARK: - HTML 解析为 DOM 树
 
+    private static let maxNodes = 40_000
+
     static func parse(_ html: String) -> HTMLNode {
         let root = HTMLNode(tag: "root")
         var current = root
@@ -82,6 +84,7 @@ nonisolated enum HTMLMiniParser {
         let end = html.endIndex
 
         var textBuffer = ""
+        var elementCount = 0
 
         while index < end {
             if html[index] == "<" {
@@ -147,6 +150,20 @@ nonisolated enum HTMLMiniParser {
                 let node = HTMLNode(tag: tag, attributes: attrs)
                 node.parent = current
                 current.children.append(node)
+                elementCount += 1
+
+                // 超大页面（几千章目录）达到节点上限时停止建树，剩余内容按纯文本提取，避免内存/耗时失控。
+                if elementCount > Self.maxNodes {
+                    let remainder = html[index...]
+                    let stripped = remainder.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+                    let cleaned = decodeHTMLEntities(stripped)
+                    if !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        let textNode = HTMLNode(tag: "#text", text: cleaned)
+                        textNode.parent = root
+                        root.children.append(textNode)
+                    }
+                    return root
+                }
 
                 // 处理 <script> 或 <style> 内容直接跳过，避免将 js/css 代码当做正文
                 if tag == "script" || tag == "style" {
