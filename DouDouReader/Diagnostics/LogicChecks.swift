@@ -810,6 +810,16 @@ enum LogicChecks {
             errors.append(":nth-child(2) 伪类匹配不符：\(nthLi ?? "nil")")
         }
 
+        // 3.8 @css: 前缀不应被误当成属性抽取。
+        let cssPrefixed = HTMLMiniParser.queryNodes(root: dom, rule: "@css:.book-list li")
+        if cssPrefixed.count != 2 {
+            errors.append("@css: 前缀规则匹配数量不为 2：\(cssPrefixed.count)")
+        }
+        let cssHref = HTMLMiniParser.queryStrings(root: dom, rule: "@css:.book-list li a@href")
+        if cssHref.first != "/book/101" {
+            errors.append("@css: 前缀 + @href 属性抽取不符：\(cssHref.first ?? "nil")")
+        }
+
         // 4. 测试 RuleBasedBookCatalog 端到端链路与网络模拟
         switch finishAsync({ try await probeRuleCatalog() }) {
         case .failure(let error):

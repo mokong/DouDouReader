@@ -442,6 +442,13 @@ nonisolated enum HTMLMiniParser {
             }
         }
 
+        // 2.5 去掉开头的 @css: / @xpath: 前缀，避免末尾 @ 回溯把 "css:.list" 误当成属性名。
+        if working.hasPrefix("@css:") {
+            working = String(working.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if working.hasPrefix("@xpath:") || working.hasPrefix("@XPath:") || working.hasPrefix("@Xpath:") {
+            working = String(working.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
         // 3. 提取末尾的属性选择器，如 @href, @text, /@href, /text(), ::text
         var targetAttr: String? = nil
 
