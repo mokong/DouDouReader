@@ -406,9 +406,16 @@ struct BookSearchView: View {
     }
 
     private var onlineRows: [SearchRow] {
-        batches.flatMap { batch in
-            batch.books.map { book in
-                SearchRow(
+        // 按书名+作者合并多源命中。batches 已按 source weight 降序，首个出现即权重最高的源。
+        var rowsByKey = [String: SearchRow]()
+        var keyOrder: [String] = []
+        var hitCount = [String: Int]()
+        for batch in batches {
+            for book in batch.books {
+                let key = (book.title + "|" + book.author).lowercased()
+                hitCount[key, default: 0] += 1
+                guard rowsByKey[key] == nil else { continue }
+                let row = SearchRow(
                     id: "\(batch.sourceID)\n\(book.id)",
                     title: book.title,
                     author: book.author,
@@ -420,7 +427,16 @@ struct BookSearchView: View {
                     remoteBookID: book.id,
                     coverURL: book.coverURL
                 )
+                rowsByKey[key] = row
+                keyOrder.append(key)
             }
+        }
+        return keyOrder.compactMap { key in
+            guard var row = rowsByKey[key] else { return nil }
+            if (hitCount[key] ?? 0) > 1 {
+                row.sourceName = "多源×\(hitCount[key] ?? 0)"
+            }
+            return row
         }
     }
 
