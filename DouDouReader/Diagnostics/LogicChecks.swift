@@ -796,6 +796,20 @@ enum LogicChecks {
             errors.append("last() 谓词未取到最后一个 li")
         }
 
+        // 3.7 CSS 子选择器 > 与伪类 :first/:last/:nth-child(n)
+        let directChildren = HTMLMiniParser.queryNodes(root: dom, rule: "ul.book-list > li")
+        if directChildren.count != 2 {
+            errors.append("CSS > 直接子选择器匹配数量不为 2：\(directChildren.count)")
+        }
+        let firstLi = HTMLMiniParser.queryStrings(root: dom, rule: "li:first a@text").first
+        if firstLi != "海边的 & 灯塔" {
+            errors.append(":first 伪类匹配不符：\(firstLi ?? "nil")")
+        }
+        let nthLi = HTMLMiniParser.queryStrings(root: dom, rule: "li:nth-child(2) a@text").first
+        if nthLi != "第二本书" {
+            errors.append(":nth-child(2) 伪类匹配不符：\(nthLi ?? "nil")")
+        }
+
         // 4. 测试 RuleBasedBookCatalog 端到端链路与网络模拟
         switch finishAsync({ try await probeRuleCatalog() }) {
         case .failure(let error):

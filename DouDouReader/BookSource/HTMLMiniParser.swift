@@ -563,8 +563,15 @@ nonisolated enum HTMLMiniParser {
         // 纯 CSS 空格选择器（不含 /）
         if !trimmed.contains("/") {
             let tokens = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            var pendingDirectChild = false
             for token in tokens {
-                steps.append(parseSingleStep(token, isDeep: true))
+                // CSS 子选择器 >：其后的步骤只匹配直接子节点。
+                if token == ">" {
+                    pendingDirectChild = true
+                    continue
+                }
+                steps.append(parseSingleStep(token, isDeep: !pendingDirectChild))
+                pendingDirectChild = false
             }
             return steps
         }
@@ -614,6 +621,20 @@ nonisolated enum HTMLMiniParser {
     private static func parseSingleStep(_ partInput: String, isDeep: Bool) -> SelectorStep {
         var part = partInput
         var step = SelectorStep(isDeep: isDeep)
+
+        // 解析 CSS 伪类 :first / :last / :nth-child(n)，转成索引语义。
+        if let pseudoRange = part.range(of: #":(first-child|first|last-child|last|nth-child\(\d+\))"#, options: .regularExpression) {
+            let pseudo = String(part[pseudoRange])
+            part.removeSubrange(pseudoRange)
+            if pseudo == ":first" || pseudo == ":first-child" {
+                step.index = 0
+            } else if pseudo == ":last" || pseudo == ":last-child" {
+                step.predicates.append(StepPredicate(kind: .isLast))
+            } else if pseudo.hasPrefix(":nth-child") {
+                let num = pseudo.dropFirst(":nth-child(".count).dropLast(1)
+                if let n = Int(num), n >= 1 { step.index = n - 1 }
+            }
+        }
 
         // 解析索引 [0]
         if let indexRange = part.range(of: #"\[\d+\]"#, options: .regularExpression) {
