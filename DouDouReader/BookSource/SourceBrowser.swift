@@ -17,6 +17,7 @@ struct SourceBrowserView: View {
     @State private var selectedSiteID = UserDefaults.standard.string(forKey: BookSourceLibrary.selectionKey) ?? "preset-xiangshu"
     @State private var selectedChannel = ""
     @State private var filterSelections: [String: String] = [:]
+    @State private var selectedSort: String = "newstime"
     @State private var showSwitchSheet = false
 
     // 搜索与发现
@@ -230,9 +231,37 @@ struct SourceBrowserView: View {
                     filterLineView(filter)
                 }
             }
+            if channelSupportsSort {
+                sortLineView
+            }
         }
         .padding(.vertical, currentChannel?.filters.isEmpty == false ? 6 : 0)
         .background(Color.black)
+    }
+
+    @ViewBuilder
+    private var sortLineView: some View {
+        let options: [(String, String)] = [("最新", "newstime"), ("人气", "hot"), ("完本", "end")]
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(Array(options.enumerated()), id: \.offset) { _, item in
+                    Button {
+                        selectedSort = item.1
+                        Task { await loadDiscover() }
+                    } label: {
+                        Text(item.0)
+                            .font(.system(size: 13, weight: selectedSort == item.1 ? .semibold : .regular))
+                            .foregroundColor(
+                                selectedSort == item.1
+                                    ? Color(red: 0.0, green: 0.85, blue: 0.95)
+                                    : Color.white.opacity(0.7)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 16)
+        }
     }
 
     private func filterLineView(_ filter: ExploreFilter) -> some View {
@@ -484,7 +513,17 @@ struct SourceBrowserView: View {
                 selections[filter.key] = chosen
             }
         }
+        // 频道模板支持 {{sort}}/%@sort 时，注入当前排序变量。
+        if channel.urlTemplate.contains("{{sort}}") || channel.urlTemplate.contains("%@sort") {
+            selections["sort"] = selectedSort
+        }
         return selections
+    }
+
+    /// 频道模板是否支持排序变量。
+    private var channelSupportsSort: Bool {
+        guard let tpl = currentChannel?.urlTemplate else { return false }
+        return tpl.contains("{{sort}}") || tpl.contains("%@sort")
     }
 
     private var errorPresented: Binding<Bool> {
