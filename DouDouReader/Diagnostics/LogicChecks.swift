@@ -488,6 +488,9 @@ enum LogicChecks {
         if SourceURL.parse("http://example.com") != nil {
             errors.append("公网 http 书源应当被拒绝")
         }
+        if SourceURL.parse("http://example.com", allowInsecureHTTP: true)?.host != "example.com" {
+            errors.append("显式授权后公网 http 书源应当被接受")
+        }
         if SourceURL.parse("http://10.0.0.8/catalog")?.host != "10.0.0.8" {
             errors.append("局域网 http 书源应当被接受")
         }

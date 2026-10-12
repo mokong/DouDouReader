@@ -68,7 +68,8 @@ nonisolated enum SourceError: LocalizedError, Equatable {
 }
 
 enum SourceURL {
-    static func parse(_ raw: String) -> URL? {
+    /// 默认仅放行 https 与局域网 http；`allowInsecureHTTP` 为用户显式授权后才放行公网 http。
+    static func parse(_ raw: String, allowInsecureHTTP: Bool = false) -> URL? {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         if !text.contains("://") {
@@ -78,7 +79,7 @@ enum SourceURL {
               let scheme = components.scheme?.lowercased(),
               let host = components.host?.lowercased(),
               !host.isEmpty else { return nil }
-        let httpAllowed = scheme == "http" && allowsLocalHTTP(host)
+        let httpAllowed = scheme == "http" && (allowsLocalHTTP(host) || allowInsecureHTTP)
         guard scheme == "https" || httpAllowed else { return nil }
         components.scheme = scheme
         components.host = host

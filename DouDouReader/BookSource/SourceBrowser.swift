@@ -1019,6 +1019,7 @@ struct SourceManagerView: View {
 
     @State private var name = ""
     @State private var address = ""
+    @State private var allowInsecureHTTP = false
     @State private var errorText: String?
     @State private var showingImportSheet = false
     @State private var importSheetMode = 0
@@ -1068,6 +1069,13 @@ struct SourceManagerView: View {
                     #endif
                 Button("添加原生书源", action: add)
                     .disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Toggle("允许公网 http 书源（明文，有安全风险）", isOn: $allowInsecureHTTP)
+                    .toggleStyle(.switch)
+                if allowInsecureHTTP {
+                    Text("仅当书源确为 http:// 公网地址时开启；明文传输可能被窃听或篡改，请确认来源可信。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             } header: {
                 Text("手动添加原生接口")
             }
@@ -1194,7 +1202,7 @@ struct SourceManagerView: View {
     }
 
     private func add() {
-        guard let url = SourceURL.parse(address) else {
+        guard let url = SourceURL.parse(address, allowInsecureHTTP: allowInsecureHTTP) else {
             errorText = SourceError.badURL.errorDescription
             return
         }
