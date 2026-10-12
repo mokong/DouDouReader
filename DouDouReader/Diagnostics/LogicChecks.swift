@@ -50,6 +50,7 @@ enum LogicChecks {
         checkReaderTapZones(&errors)
         checkBookCachePlan(&errors)
         checkSpeechEntry(&errors)
+        checkSpeechRateMenu(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -2468,6 +2469,23 @@ enum LogicChecks {
         }
         if ReaderEngine.speechEntryAction(isActive: true) != .openControls {
             errors.append("听书入口: 朗读中应展开控制菜单")
+        }
+    }
+
+    /// 朗读控制菜单的语速档位：升序、落在 0.32–0.80 范围内、标签带 x。
+    private static func checkSpeechRateMenu(_ errors: inout [String]) {
+        let options = ReaderEngine.SpeechRateMenu.options
+        if options != options.sorted() {
+            errors.append("朗读语速: 档位应升序排列 \(options)")
+        }
+        if let out = options.first(where: { $0 < 0.32 || $0 > 0.8 }) {
+            errors.append("朗读语速: 档位超出设置范围 \(out)")
+        }
+        if options.isEmpty {
+            errors.append("朗读语速: 档位不应为空")
+        }
+        if !ReaderEngine.SpeechRateMenu.label(0.48).hasSuffix("x") {
+            errors.append("朗读语速: 标签格式不符 \(ReaderEngine.SpeechRateMenu.label(0.48))")
         }
     }
 }

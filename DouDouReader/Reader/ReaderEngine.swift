@@ -333,6 +333,12 @@ final class ReaderEngine {
         isActive ? .openControls : .startDirect
     }
 
+    /// 朗读控制菜单里的语速档位（与设置页 0.32–0.80 范围一致）。
+    nonisolated enum SpeechRateMenu {
+        static let options: [Double] = [0.32, 0.4, 0.48, 0.6, 0.8]
+        static func label(_ rate: Double) -> String { String(format: "%.2fx", rate) }
+    }
+
     func toggleSpeech() {
         if speech.isActive {
             haltSpeech()
@@ -340,6 +346,48 @@ final class ReaderEngine {
         }
         stopAuto()
         guard !isTerminal(position) else { return }
+        if settings.speechMode == .page {
+            speakCurrentPage()
+        } else {
+            speakCurrentChapter()
+        }
+    }
+
+    /// 朗读中「上一段 / 下一段」跳跃：按当前朗读粒度（页=上一页/下一页，章=上一章/下一章）
+    /// 移动位置并用新设置重新朗读。页模式复用 go(delta:)（已含朗读联动）；章模式向前复用
+    /// onAdvance 的推进路径（含在线章边界），向后只回本地已下载章节。
+    func skipSpeech(delta: Int) {
+        guard speech.isActive else { return }
+        if settings.speechMode == .page {
+            go(delta: delta)
+            return
+        }
+        if delta > 0 {
+            handleSpeechAdvance(.chapter)
+            return
+        }
+        let target = max(0, position.chapterIndex - 1)
+        guard target != position.chapterIndex else { return }
+        position = ReaderPosition(chapterIndex: target, pageIndex: 0)
+        commit()
+        speakCurrentChapter()
+    }
+
+    /// 朗读中热调语速：写入设置，正在朗读则以新语速重读当前段；未朗读只保存。
+    func applySpeechRate(_ rate: Double) {
+        settings.speechRate = rate
+        guard speech.isActive else { return }
+        restartCurrentSpeechSegment()
+    }
+
+    /// 朗读中热换音色：写入设置，正在朗读则以新音色重读当前段；未朗读只保存。
+    func applySpeechVoice(_ voiceID: String) {
+        settings.speechVoiceID = voiceID
+        guard speech.isActive else { return }
+        restartCurrentSpeechSegment()
+    }
+
+    private func restartCurrentSpeechSegment() {
         if settings.speechMode == .page {
             speakCurrentPage()
         } else {

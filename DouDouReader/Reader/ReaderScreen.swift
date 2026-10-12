@@ -1,5 +1,6 @@
 import SwiftData
 import SwiftUI
+import AVFAudio
 #if os(iOS) || os(visionOS)
 import UIKit
 #endif
@@ -439,15 +440,38 @@ struct ReaderScreen: View {
                 }
                 .buttonStyle(.plain)
             case .openControls:
-                // 朗读中：保留控制菜单（暂停/继续、停止）。
+                // 朗读中：播放/暂停、停止、上一段/下一段、语速、音色，五项一步可达。
                 Menu {
                     if engine.speech.isPaused {
                         Button("继续朗读") { engine.speech.togglePause() }
                     } else {
                         Button("暂停朗读") { engine.speech.togglePause() }
                     }
-                    Button("停止朗读") {
+                    Button("停止朗读", role: .destructive) {
                         engine.toggleSpeech()
+                    }
+                    Divider()
+                    Button("上一段") { engine.skipSpeech(delta: -1) }
+                    Button("下一段") { engine.skipSpeech(delta: 1) }
+                    Divider()
+                    Menu("语速") {
+                        ForEach(ReaderEngine.SpeechRateMenu.options, id: \.self) { rate in
+                            Button {
+                                engine.applySpeechRate(rate)
+                            } label: {
+                                let marked = abs(engine.settings.speechRate - rate) < 0.005
+                                Label(ReaderEngine.SpeechRateMenu.label(rate), systemImage: marked ? "checkmark" : "")
+                            }
+                        }
+                    }
+                    Menu("音色") {
+                        ForEach(SpeechController.chineseVoices(), id: \.identifier) { voice in
+                            Button {
+                                engine.applySpeechVoice(voice.identifier)
+                            } label: {
+                                Label(voice.name, systemImage: engine.settings.speechVoiceID == voice.identifier ? "checkmark" : "")
+                            }
+                        }
                     }
                 } label: {
                     Image(systemName: listenSymbol(engine))
