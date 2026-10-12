@@ -1,5 +1,6 @@
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
 #if os(iOS) || os(visionOS)
 import UIKit
 #elseif os(macOS)
@@ -1031,6 +1032,8 @@ struct SourceManagerView: View {
     @State private var testAlert = false
     @State private var editingRecord: SourceRecord?
     @State private var detailRecord: SourceRecord?
+    @State private var importingLocalFile = false
+    @State private var sourceSearch = ""
 
     var body: some View {
         List {
@@ -1055,6 +1058,12 @@ struct SourceManagerView: View {
                     showingImportSheet = true
                 } label: {
                     Label("通过网络 URL 一键订阅书源", systemImage: "link.badge.plus")
+                }
+
+                Button {
+                    importingLocalFile = true
+                } label: {
+                    Label("导入本地 .xbs / .json 书源文件", systemImage: "folder")
                 }
             } header: {
                 Text("快捷导入")
@@ -1082,58 +1091,8 @@ struct SourceManagerView: View {
             }
 
             Section {
-                if sources.isEmpty {
-                    Text("还没有自定义书源，可点击上方导入推荐书源。")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(sources) { source in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(source.name).font(.headline)
-                                Spacer()
-                                badgeFor(source: source)
-                                if !source.subscriptionURL.isEmpty, updatingID != source.id {
-                                    Button {
-                                        updatingID = source.id
-                                        Task { await checkUpdate(source: source) }
-                                    } label: {
-                                        Image(systemName: "arrow.triangle.2.circlepath")
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("检查更新")
-                                } else if updatingID == source.id {
-                                    ProgressView().controlSize(.small)
-                                }
-                                Toggle("", isOn: Bindable(source).enabled)
-                                    .labelsHidden()
-                                Menu {
-                                    Button {
-                                        testingID = source.id
-                                        Task { await testSource(source: source) }
-                                    } label: { Label("测试搜索", systemImage: "waveform.magnifyingglass") }
-                                    Button { editingRecord = source } label: { Label("编辑规则", systemImage: "pencil") }
-                                    Button { detailRecord = source } label: { Label("查看详情", systemImage: "doc.text") }
-                                    Button {
-                                        copyToClipboard(source.rawJSON)
-                                        errorText = "已复制该源 JSON 到剪贴板"
-                                    } label: { Label("复制 JSON", systemImage: "doc.on.doc") }
-                                } label: {
-                                    if testingID == source.id {
-                                        ProgressView().controlSize(.small)
-                                    } else {
-                                        Image(systemName: "ellipsis.circle")
-                                    }
-                                }
-                                .menuStyle(.borderlessButton)
-                                .fixedSize()
-                            }
-                            Text(source.baseURL)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .onDelete(perform: delete)
-                }
+                TextField("搜索名称 / 地址 / 分组", text: $sourceSearch)
+                    .textFieldStyle(.roundedBorder)
             } header: {
                 HStack {
                     Text("已添加的书源 (\(sources.count))")
@@ -1144,8 +1103,31 @@ struct SourceManagerView: View {
                     }
                 }
             }
+            if groupedFilteredSources.isEmpty {
+                Section {
+                    Text(sources.isEmpty ? "还没有自定义书源，可点击上方导入推荐书源。" : "没有匹配的书源。")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                ForEach(groupedFilteredSources) { group in
+                    Section {
+                        ForEach(group.sources) { source in
+                            sourceRow(source: source)
+                        }
+                    } header: {
+                        Text(group.name)
+                    }
+                }
+            }
         }
         .navigationTitle("书源管理")
+        .fileImporter(
+            isPresented: $importingLocalFile,
+            allowedContentTypes: localBookSourceTypes,
+            allowsMultipleSelection: true
+        ) { result in
+            importLocalFiles(result)
+        }
         .sheet(isPresented: $showingImportSheet) {
             SourceImportSheet(initialMode: importSheetMode) { newSources, subscriptionURL in
                 importSources(newSources, subscriptionURL: subscriptionURL)
@@ -1202,6 +1184,102 @@ struct SourceManagerView: View {
         Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })
     }
 
+    private struct ManagedGroup: Identifiable {
+        var name: String
+        var sources: [SourceRecord]
+        var id: String { name }
+    }
+
+    private var filteredSources: [SourceRecord] {
+        let needle = sourceSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return sources }
+        return sources.filter {
+            $0.name.lowercased().contains(needle)
+                || $0.baseURL.lowercased().contains(needle)
+                || $0.groupName.lowercased().contains(needle)
+        }
+    }
+
+    /// 按分组名归组，空分组归入「默认分组」，保持导入顺序。
+    private var groupedFilteredSources: [ManagedGroup] {
+        var order: [String] = []
+        var map: [String: [SourceRecord]] = [:]
+        for source in filteredSources {
+            let trimmed = source.groupName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = trimmed.isEmpty ? "默认分组" : trimmed
+            if map[key] == nil { order.append(key) }
+            map[key, default: []].append(source)
+        }
+        return order.map { ManagedGroup(name: $0, sources: map[$0] ?? []) }
+    }
+
+    private var localBookSourceTypes: [UTType] {
+        var types: [UTType] = [.json]
+        if let xbs = UTType(filenameExtension: "xbs") { types.append(xbs) }
+        return types
+    }
+
+    @ViewBuilder
+    private func sourceRow(source: SourceRecord) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(source.name).font(.headline)
+                Spacer()
+                badgeFor(source: source)
+                if !source.subscriptionURL.isEmpty, updatingID != source.id {
+                    Button {
+                        updatingID = source.id
+                        Task { await checkUpdate(source: source) }
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.plain)
+                    .help("检查更新")
+                } else if updatingID == source.id {
+                    ProgressView().controlSize(.small)
+                }
+                Toggle("", isOn: Bindable(source).enabled)
+                    .labelsHidden()
+                Menu {
+                    Button {
+                        testingID = source.id
+                        Task { await testSource(source: source) }
+                    } label: { Label("测试搜索", systemImage: "waveform.magnifyingglass") }
+                    Button { editingRecord = source } label: { Label("编辑规则", systemImage: "pencil") }
+                    Button { detailRecord = source } label: { Label("查看详情", systemImage: "doc.text") }
+                    Button {
+                        copyToClipboard(source.rawJSON)
+                        errorText = "已复制该源 JSON 到剪贴板"
+                    } label: { Label("复制 JSON", systemImage: "doc.on.doc") }
+                    Button(role: .destructive) {
+                        modelContext.delete(source)
+                        try? modelContext.save()
+                    } label: { Label("删除", systemImage: "trash") }
+                } label: {
+                    if testingID == source.id {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+            Text(source.baseURL)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text("权重 \(source.weight)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Stepper("", value: Bindable(source).weight, in: 0...9999)
+                    .labelsHidden()
+                    .controlSize(.small)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
     private func add() {
         guard let url = SourceURL.parse(address, allowInsecureHTTP: allowInsecureHTTP) else {
             errorText = SourceError.badURL.errorDescription
@@ -1238,18 +1316,40 @@ struct SourceManagerView: View {
                 baseURL: normalizedURL,
                 format: source.kind.rawValue,
                 rawJSON: rawJSON,
-                subscriptionURL: subscriptionURL
+                subscriptionURL: subscriptionURL,
+                groupName: source.group,
+                weight: source.weight
             )
             modelContext.insert(record)
         }
         try? modelContext.save()
     }
 
-    private func delete(at offsets: IndexSet) {
-        for index in offsets {
-            modelContext.delete(sources[index])
+    /// 本地选择 .xbs / .json 文件导入。xbs 会先在 BookSourceParser 里自动解密。
+    private func importLocalFiles(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure:
+            errorText = "没有拿到文件"
+        case .success(let urls):
+            var total = 0
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                let data: Data
+                let parsed: [UniversalBookSource]
+                do {
+                    data = try Data(contentsOf: url)
+                    parsed = try BookSourceParser.parse(data: data)
+                } catch {
+                    if scoped { url.stopAccessingSecurityScopedResource() }
+                    errorText = "文件 \(url.lastPathComponent) 解析失败：\(error.localizedDescription)"
+                    return
+                }
+                if scoped { url.stopAccessingSecurityScopedResource() }
+                importSources(parsed)
+                total += parsed.count
+            }
+            errorText = total > 0 ? "已导入 \(total) 个书源" : "这些文件里没有可用书源"
         }
-        try? modelContext.save()
     }
 
     /// 重拉订阅地址并覆盖 rawJSON，保留 enabled 状态。
@@ -1339,6 +1439,7 @@ struct SourceImportSheet: View {
     @State private var previewSources: [UniversalBookSource] = []
     @State private var selectedIDs: Set<String> = []
     @State private var presetSelectedIDs: Set<String> = Set(PresetBookSources.all.map(\.id))
+    @State private var presetSearch = ""
 
     init(initialMode: Int = 0, onImport: @escaping ([UniversalBookSource], _ subscriptionURL: String) -> Void) {
         self.initialMode = initialMode
@@ -1421,7 +1522,12 @@ struct SourceImportSheet: View {
             .padding(.horizontal)
             .padding(.bottom, 8)
 
-            List(PresetBookSources.all) { item in
+            TextField("搜索内置书源目录", text: $presetSearch)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+
+            List(filteredPresets) { item in
                 Button {
                     if presetSelectedIDs.contains(item.id) {
                         presetSelectedIDs.remove(item.id)
@@ -1609,6 +1715,16 @@ struct SourceImportSheet: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+    }
+
+    private var filteredPresets: [PresetBookSourceItem] {
+        let needle = presetSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return PresetBookSources.all }
+        return PresetBookSources.all.filter {
+            $0.name.lowercased().contains(needle)
+                || $0.summary.lowercased().contains(needle)
+                || $0.group.lowercased().contains(needle)
         }
     }
 

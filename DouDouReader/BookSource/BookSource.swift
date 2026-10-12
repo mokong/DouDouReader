@@ -12,8 +12,12 @@ final class SourceRecord {
     var rawJSON: String = ""
     /// 书源订阅地址。非空时管理页可「检查更新」重拉并覆盖 rawJSON。
     var subscriptionURL: String = ""
+    /// 分组名：管理页按分组展示，空串归入默认分组。
+    var groupName: String = ""
+    /// 权重：决定发现页切换列表里的排序，大的在前。
+    var weight: Int = 100
 
-    init(name: String, baseURL: String, format: String = "doudou", rawJSON: String = "", subscriptionURL: String = "") {
+    init(name: String, baseURL: String, format: String = "doudou", rawJSON: String = "", subscriptionURL: String = "", groupName: String = "", weight: Int = 100) {
         self.id = UUID()
         self.name = name
         self.baseURL = baseURL
@@ -22,6 +26,8 @@ final class SourceRecord {
         self.format = format
         self.rawJSON = rawJSON
         self.subscriptionURL = subscriptionURL
+        self.groupName = groupName
+        self.weight = weight
     }
 }
 

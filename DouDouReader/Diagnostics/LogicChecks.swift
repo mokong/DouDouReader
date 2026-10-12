@@ -45,6 +45,7 @@ enum LogicChecks {
         checkEpub(&errors)
         checkBookSearch(&errors)
         checkSourceSwitchHits(&errors)
+        checkXBS(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -2301,5 +2302,67 @@ enum LogicChecks {
         // @js: return 字面量提取。
         let jsLit = HTMLMiniParser.queryStrings(root: root, rule: "@js:return 'https://example.com/api'")
         if jsLit.first != "https://example.com/api" { errors.append("回归: @js: return 字面量提取不符，实际 \(jsLit.first ?? "nil")") }
+    }
+
+    /// xbs 解密与二进制书源导入。向量由独立 Python XXTEA 参考实现生成，钉住小端字序与尾部长度格式。
+    private static func checkXBS(_ errors: inout [String]) {
+        // 1. 最小向量：解密后应是指定 JSON 文本。
+        let tiny = data(hex: "234496a67171b35709eb2b62ca2753cd09fa0cb6dfc899180febe7e49e532ec6b731f065262ba17198a964c42331fd8c")
+        guard let tinyJSON = XBSDecoder.decryptJSON(xbs: tiny) else {
+            errors.append("xbs 最小向量解密失败")
+            return
+        }
+        let tinyText = String(data: tinyJSON, encoding: .utf8) ?? ""
+        if tinyText != "{\"demo-key\":\"中文\",\"n\":42,\"list\":[1,2,3]}" {
+            errors.append("xbs 最小向量解密结果不符：\(tinyText)")
+        }
+
+        // 2. 真实香色 alias 结构 xbs：解出后走既有 parse 映射为一条香色书源。
+        let xiangseXBS = data(hex: "3a98eabb0285b91fe8dbaed170d6c8a83fdd713d1493d29471997bb7799d90a37d7755091a4a60150198b57985baa1580a2c5f86865ed8f9e36e57aae906a360ba7f147d20bededf59adef72bdf6e378c63f2bf431fd5d5684cb73c28b6e27887353618b0cbcad12ad3aad6201cc6a61989bf57dadbb77a5904c5799c2854b2ece72798ed3f55dd1e975de868108290ae64e230532e3fd2672885e95d91f3f6bef967a4f83663979b79cc816204cc9b79e6f26f9f6f0709bac6ce1b1b67a6bb377daf57023e83e2e664855119868857508927ea992c6ba8f6232bb05a06201607d9fbb32759fdf6b4ebba56a9264e63eedc1d97429c5c80eb5d465101c4e04aa5ad2c1b0742dc1132ebe307acf89133d15fe03f8845f840ca6ac4143d419c6df836c2cc36e6b6a330644c23b206d977d9c99bac8078f4686d4a289c19bf04fb1db9f64240700d1b0eb398fb3782d392439df4e753ebe99dd1e995b2ffb055af70fb70b16f81c9052cc27100fd98396ceb807e918102d8b2d605100857b23823f4483ac9437309afd205a442ed26d2b79fdb7de77166e5ec7b0a2ba4878742f22ee200d5c2d438c47d59d8abda177ea0956ac54c1bbd40afe0402b7e037ab7f2942bdbf03367f2d6d93394191e1d634ebba575e1d85b50cfe877dce39d868035af529e104736a17f891f7a86dd241b8bdc0259ed4fbc8891369de084c766f72b83e55fa609b6185adb27a3ee176daf1d6c7dba0bdb10a4b20c10305dc86859b57097ad08a8a58973cada2a6bc8aa020ccb7912e98bf2c8b548442e8a880cd2c7e231581b09e6c18ca3fe65f850f78092d7a41291f")
+        do {
+            let parsed = try BookSourceParser.parse(data: xiangseXBS)
+            guard let first = parsed.first else {
+                errors.append("xbs 香色向量解析为空")
+                return
+            }
+            if first.kind != .xiangse || first.name != "测试香色源" || first.weight != 8888 {
+                errors.append("xbs 香色书源元数据不符：\(first.kind) \(first.name) \(first.weight)")
+            }
+            if first.searchRule.listSelector != "//ul[@id='result']/li" {
+                errors.append("xbs 香色书源规则选择器不符")
+            }
+        } catch {
+            errors.append("xbs 香色向量解析失败：\(error)")
+        }
+
+        // 3. 兜底：非法长度的密文应返回 nil，不能崩溃。
+        if XBSDecoder.decryptJSON(xbs: Data([0x01, 0x02, 0x03])) != nil {
+            errors.append("xbs 非法长度应解密失败")
+        }
+
+        // 4. 回归：普通 JSON 文本数据走 parse(data:) 与 parse(text:) 等价。
+        let jsonText = "[{\"bookSourceName\":\"回归源\",\"bookSourceUrl\":\"https://regress.test\"}]"
+        do {
+            let fromText = try BookSourceParser.parse(text: jsonText)
+            let fromData = try BookSourceParser.parse(data: Data(jsonText.utf8))
+            if fromText.first?.name != fromData.first?.name {
+                errors.append("parse(data:) 文本路径与 parse(text:) 结果不一致")
+            }
+        } catch {
+            errors.append("parse(data:) 文本回归失败：\(error)")
+        }
+    }
+
+    private static func data(hex: String) -> Data {
+        var data = Data()
+        var hex = hex
+        while hex.count >= 2 {
+            let pair = hex.prefix(2)
+            hex = String(hex.dropFirst(2))
+            if let byte = UInt8(pair, radix: 16) {
+                data.append(byte)
+            }
+        }
+        return data
     }
 }

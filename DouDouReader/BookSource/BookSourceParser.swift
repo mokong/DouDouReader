@@ -69,7 +69,7 @@ enum BookSourceParser {
         return results
     }
 
-    /// 从网络 URL 拉取并解析书源
+    /// 从网络 URL 拉取并解析书源。响应可能是 JSON 文本，也可能是 xbs 加密书源。
     static func fetchAndParse(from rawURL: String) async throws -> [UniversalBookSource] {
         var urlStr = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -103,18 +103,34 @@ enum BookSourceParser {
             throw BookSourceParserError.networkError("服务器返回 HTTP \(http.statusCode)")
         }
 
-        // 解码文本
-        let content: String
-        if let utf8Str = String(data: data, encoding: .utf8) {
-            content = utf8Str
-        } else if let gbkEncoding = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)) as UInt?,
-                  let gbkStr = String(data: data, encoding: String.Encoding(rawValue: gbkEncoding)) {
-            content = gbkStr
-        } else {
-            throw BookSourceParserError.networkError("无法识别返回内容的字符编码")
-        }
+        return try parse(data: data)
+    }
 
-        return try parse(text: content)
+    /// 按内容自动识别书源数据：UTF-8 / GB18030 的 JSON 文本，或 xbs（XXTEA 加密）二进制。
+    /// 文本路径与 parse(text:) 完全一致，保证阅读 3.0 / 香色粘贴导入不回归。
+    static func parse(data: Data) throws -> [UniversalBookSource] {
+        if let text = bookSourceText(in: data) {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
+                do {
+                    return try parse(text: text)
+                } catch BookSourceParserError.unsupportedFormat {
+                    // 文本不像书源 JSON，继续按 xbs 二进制尝试
+                } catch {
+                    throw error
+                }
+            }
+        }
+        if let text = XBSDecoder.jsonText(xbs: data) {
+            return try parse(text: text)
+        }
+        throw BookSourceParserError.unsupportedFormat
+    }
+
+    private static func bookSourceText(in data: Data) -> String? {
+        if let text = String(data: data, encoding: .utf8) { return text }
+        if let text = String(data: data, encoding: TextDecoding.gb18030) { return text }
+        return nil
     }
 
     // MARK: - 字典分类解析

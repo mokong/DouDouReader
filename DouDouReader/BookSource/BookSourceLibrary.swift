@@ -129,6 +129,10 @@ enum BookSourceLibrary {
             source.sourceURL = record.baseURL.isEmpty ? fallback.sourceURL : record.baseURL
             source.exploreRule = SourceExploreRule()
         }
+        source.weight = record.weight
+        if group.isEmpty, !record.groupName.isEmpty {
+            source.group = record.groupName
+        }
         let resolvedGroup = group.isEmpty ? (source.group.isEmpty ? "文本/小说" : source.group) : group
         return SwitchableSource(
             id: record.id.uuidString,
