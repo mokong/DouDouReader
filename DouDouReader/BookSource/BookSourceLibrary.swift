@@ -69,7 +69,14 @@ enum BookSourceLibrary {
             )
             items.append(item(from: record, fallback: fallback, icon: "📄", note: "", group: ""))
         }
-        return items
+        // 按书源自带 weight 降序排列，权重高的排前面；等权重保持原有顺序。
+        let indexed = items.enumerated()
+        return indexed.sorted { a, b in
+            if a.element.source.weight != b.element.source.weight {
+                return a.element.source.weight > b.element.source.weight
+            }
+            return a.offset < b.offset
+        }.map(\.element)
     }
 
     static func resolve(id: String, records: [SourceRecord]) -> SwitchableSource? {

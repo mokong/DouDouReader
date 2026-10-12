@@ -1112,9 +1112,15 @@ struct SourceManagerView: View {
     }
 
     private func importSources(_ parsedList: [UniversalBookSource]) {
+        var seenHosts = Set(sources.map { BookSourceLibrary.hostKey($0.baseURL) })
         for source in parsedList {
             let normalizedURL = source.sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            if sources.contains(where: { $0.baseURL == normalizedURL && $0.name == source.name }) {
+            // 同站（按 host）多名字也视为重复；导入批次内部也去重。
+            let host = BookSourceLibrary.hostKey(normalizedURL)
+            if !host.isEmpty {
+                if seenHosts.contains(host) { continue }
+                seenHosts.insert(host)
+            } else if sources.contains(where: { $0.baseURL == normalizedURL && $0.name == source.name }) {
                 continue
             }
             let rawJSON = (try? BookSourceParser.encode(source: source)) ?? source.rawJSON
