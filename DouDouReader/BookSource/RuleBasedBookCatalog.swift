@@ -126,6 +126,16 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         )
     }
 
+    /// 书架检查更新用：只拉详情页和目录，不下任何章节正文。
+    func fetchTOC(bookID: String) async throws -> OnlineTOC {
+        let prepared = try await prepare(bookID: bookID)
+        return OnlineTOC(
+            title: prepared.title,
+            author: prepared.author,
+            chapters: prepared.chapters.map { RemoteChapterRef(title: $0.title, url: $0.url.absoluteString) }
+        )
+    }
+
     func fetchChapterText(url: String) async throws -> String {
         guard let chapterURL = resolveURL(url, relativeTo: source.sourceURL) else {
             throw SourceError.badURL

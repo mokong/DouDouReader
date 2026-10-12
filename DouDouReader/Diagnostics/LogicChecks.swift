@@ -46,6 +46,7 @@ enum LogicChecks {
         checkBookSearch(&errors)
         checkSourceSwitchHits(&errors)
         checkXBS(&errors)
+        checkBookUpdateComparison(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -2364,5 +2365,44 @@ enum LogicChecks {
             }
         }
         return data
+    }
+
+    /// 书架检查更新的目录比较：新增章节数、最新章变化、空目录、源删章兜底。
+    private static func checkBookUpdateComparison(_ errors: inout [String]) {
+        let one = [RemoteChapterRef(title: "第1章", url: "/c1")]
+        let two = [
+            RemoteChapterRef(title: "第1章", url: "/c1"),
+            RemoteChapterRef(title: "第2章", url: "/c2")
+        ]
+
+        // 远端多一章：有更新，新章数 1，最新章名为远端最后一章。
+        let grown = BookUpdateComparison.compare(local: one, remote: two)
+        if grown.newChapterCount != 1 || !grown.hasUpdate || grown.latestTitle != "第2章" {
+            errors.append("检查更新: 远端多一章判定不符 \(grown)")
+        }
+
+        // 目录完全一致：无更新。
+        let same = BookUpdateComparison.compare(local: two, remote: two)
+        if same.hasUpdate || same.newChapterCount != 0 {
+            errors.append("检查更新: 目录一致应无更新 \(same)")
+        }
+
+        // 章节数相同但最新章名变了：仍算有更新，新章数为 0。
+        let renamed = [
+            RemoteChapterRef(title: "第1章", url: "/c1"),
+            RemoteChapterRef(title: "终章", url: "/c2")
+        ]
+        let changed = BookUpdateComparison.compare(local: two, remote: renamed)
+        if !changed.hasUpdate || changed.newChapterCount != 0 {
+            errors.append("检查更新: 最新章名变化判定不符 \(changed)")
+        }
+
+        // 远端目录为空：不算更新。
+        let empty = BookUpdateComparison.compare(local: two, remote: [])
+        if empty.hasUpdate { errors.append("检查更新: 远端空目录不应判为更新") }
+
+        // 远端比本地少章（源删章）：不计数为新章节。
+        let shrunk = BookUpdateComparison.compare(local: two, remote: one)
+        if shrunk.newChapterCount != 0 { errors.append("检查更新: 源删章不应计为新章节 \(shrunk)") }
     }
 }

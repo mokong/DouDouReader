@@ -22,6 +22,11 @@ final class BookRecord {
     var remoteBookID: String = ""
     var remoteSourceID: String = ""
     var loadedChapterCount: Int = 0
+    /// 检查更新状态：是否有新章节、新章节数量、远端最新章名、上次检查反馈。
+    var updateAvailable: Bool = false
+    var newChapterCount: Int = 0
+    var latestRemoteChapterTitle: String = ""
+    var lastCheckMessage: String = ""
 
     @Relationship(deleteRule: .cascade, inverse: \BookmarkRecord.book)
     var bookmarks: [BookmarkRecord] = []

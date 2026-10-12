@@ -114,6 +114,7 @@ struct BookshelfView: View {
     @Environment(ReaderSettingsStore.self) private var settings
     @Environment(\.modelContext) private var modelContext
     @Query private var books: [BookRecord]
+    @Query private var sourceRecords: [SourceRecord]
     @AppStorage("shelf.sort") private var sortRaw = ShelfSort.recent.rawValue
     @AppStorage("shelf.layout") private var layoutRaw = "grid"
     @State private var importingText = false
@@ -121,6 +122,8 @@ struct BookshelfView: View {
     @State private var notice: String?
     @State private var pendingDelete: BookRecord?
     @State private var didOpenSample = false
+    @State private var checkingUpdates = false
+    @State private var updatingBookIDs: Set<UUID> = []
 
     private var sort: ShelfSort { ShelfSort(rawValue: sortRaw) ?? .recent }
     private var showsGrid: Bool { layoutRaw != "list" }
@@ -226,6 +229,15 @@ struct BookshelfView: View {
             didOpenSample = true
             openSample()
         }
+        .onChange(of: path) { _, newValue in
+            // 打开一本书时清掉它的更新角标：新目录已经随检查结果落库。
+            if case .book(let id) = newValue.last, let book = books.first(where: { $0.id == id }) {
+                if book.updateAvailable {
+                    book.updateAvailable = false
+                    try? modelContext.save()
+                }
+            }
+        }
     }
 
     private var noticePresented: Binding<Bool> {
@@ -257,6 +269,10 @@ struct BookshelfView: View {
             ForEach(visibleBooks, id: \.id) { book in
                 NavigationLink(value: ShelfDestination.book(book.id)) {
                     BookCover(book: book)
+                        .overlay(alignment: .topTrailing) {
+                            updateBadge(book)
+                                .padding(6)
+                        }
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(book.title)
@@ -277,6 +293,7 @@ struct BookshelfView: View {
                                     .font(.headline)
                                     .foregroundStyle(ShelfInk.ink)
                                     .lineLimit(1)
+                                updateBadge(book)
                                 if book.isPinned {
                                     Image(systemName: "pin.fill").font(.caption).foregroundStyle(ShelfInk.accent)
                                 }
@@ -367,10 +384,23 @@ struct BookshelfView: View {
             } label: {
                 Label(showsGrid ? "列表" : "封面", systemImage: showsGrid ? "list.bullet" : "square.grid.2x2")
             }
+            Divider()
+            Button {
+                Task { await checkAllUpdates() }
+            } label: {
+                Label(checkingUpdates ? "正在检查更新…" : "检查全部更新", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(checkingUpdates)
         } label: {
-            Image(systemName: "folder")
-                .font(.system(size: 20, weight: .semibold))
-                .frame(width: 44, height: 44)
+            ZStack {
+                Image(systemName: "folder")
+                    .font(.system(size: 20, weight: .semibold))
+                if checkingUpdates {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            .frame(width: 44, height: 44)
         }
         .accessibilityLabel("整理书架")
     }
@@ -409,6 +439,14 @@ struct BookshelfView: View {
 
     @ViewBuilder
     private func bookMenu(_ book: BookRecord) -> some View {
+        if !book.remoteBookID.isEmpty {
+            Button {
+                Task { await checkUpdate(book: book) }
+            } label: {
+                Label(updatingBookIDs.contains(book.id) ? "正在检查…" : "检查更新", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(updatingBookIDs.contains(book.id))
+        }
         Button {
             book.isPinned.toggle()
             try? modelContext.save()
@@ -416,6 +454,92 @@ struct BookshelfView: View {
             Label(book.isPinned ? "取消置顶" : "置顶", systemImage: book.isPinned ? "pin.slash" : "pin")
         }
         Button("删除", role: .destructive) { pendingDelete = book }
+    }
+
+    /// 更新角标：在线书检查出有新章节时显示。
+    @ViewBuilder
+    private func updateBadge(_ book: BookRecord) -> some View {
+        if book.updateAvailable {
+            Text(book.newChapterCount > 0 ? "新 \(book.newChapterCount) 章" : "有更新")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.orange.opacity(0.92), in: Capsule())
+                .foregroundStyle(.white)
+        }
+    }
+
+    private func checkUpdate(book: BookRecord) async {
+        updatingBookIDs.insert(book.id)
+        defer { updatingBookIDs.remove(book.id) }
+
+        let items = BookSourceLibrary.switchable(records: sourceRecords)
+        guard let item = items.first(where: { $0.id == book.remoteSourceID }),
+              let catalog = BookSourceLibrary.catalog(for: item) as? IncrementalBookCatalog else {
+            book.lastCheckMessage = "书源失效，请换源"
+            book.updateAvailable = false
+            try? modelContext.save()
+            notice = "《\(book.title)》书源失效，请换源"
+            return
+        }
+
+        do {
+            let toc = try await catalog.fetchTOC(bookID: book.remoteBookID)
+            let local = RemoteChapterList.decode(book.remoteChapterList)
+            let outcome = BookUpdateComparison.compare(local: local, remote: toc.chapters)
+            book.remoteChapterList = RemoteChapterList.encode(toc.chapters)
+            book.updateAvailable = outcome.hasUpdate
+            book.newChapterCount = outcome.newChapterCount
+            book.latestRemoteChapterTitle = outcome.latestTitle
+            book.lastCheckMessage = outcome.hasUpdate ? "发现 \(outcome.newChapterCount) 章更新" : "已是最新"
+            try? modelContext.save()
+        } catch {
+            book.lastCheckMessage = "书源失效，请换源"
+            book.updateAvailable = false
+            try? modelContext.save()
+            notice = "《\(book.title)》检查失败：\(friendlyCheckError(error))"
+        }
+    }
+
+    private func checkAllUpdates() async {
+        checkingUpdates = true
+        defer { checkingUpdates = false }
+        let online = visibleBooks.filter { !$0.remoteBookID.isEmpty }
+        guard !online.isEmpty else {
+            notice = "书架上没有需要检查的在线书"
+            return
+        }
+        var updated = 0
+        var failed = 0
+        for book in online {
+            await checkUpdate(book: book)
+            if book.updateAvailable {
+                updated += 1
+            } else if book.lastCheckMessage == "书源失效，请换源" {
+                failed += 1
+            }
+        }
+        notice = "检查完成：\(updated) 本有更新\(failed > 0 ? "，\(failed) 本书源失效" : "")"
+    }
+
+    private func friendlyCheckError(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .notConnectedToInternet, .timedOut, .cannotFindHost, .cannotConnectToHost:
+                return "网络异常，请稍后重试"
+            default:
+                break
+            }
+        }
+        if let sourceError = error as? SourceError {
+            switch sourceError {
+            case .emptyBook, .notFound:
+                return "书源失效，请换源"
+            default:
+                return "书源失效，请换源"
+            }
+        }
+        return "书源失效，请换源"
     }
 
     private func progressText(_ book: BookRecord) -> String {

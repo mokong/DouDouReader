@@ -40,6 +40,13 @@ nonisolated struct OnlineOpening: Sendable {
     var openingBody: String = ""
 }
 
+/// 轻量目录拉取结果：只含目录元数据，不含任何章节正文，用于书架检查更新。
+nonisolated struct OnlineTOC: Sendable {
+    var title: String
+    var author: String
+    var chapters: [RemoteChapterRef]
+}
+
 nonisolated struct CatalogBook: Identifiable, Equatable, Sendable {
     var id: String
     var title: String
@@ -256,6 +263,14 @@ nonisolated protocol IncrementalBookCatalog: BookCatalog {
     func fetchChapterText(url: String) async throws -> String
 }
 
+extension IncrementalBookCatalog {
+    /// 默认实现复用 fetchOpening（会多下第一章正文）。规则书源与原生 API 应覆盖为轻量目录拉取。
+    func fetchTOC(bookID: String) async throws -> OnlineTOC {
+        let opening = try await fetchOpening(bookID: bookID)
+        return OnlineTOC(title: opening.title, author: opening.author, chapters: opening.chapters)
+    }
+}
+
 nonisolated struct SampleBookCatalog: BookCatalog {
     static let stableID = "builtin.doudou"
     let id = SampleBookCatalog.stableID
@@ -345,6 +360,23 @@ nonisolated struct RemoteBookCatalog: IncrementalBookCatalog {
         let content = body.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { throw SourceError.emptyBook }
         return content
+    }
+
+    /// 书架检查更新用：详情接口直接返回目录，不下章节正文。
+    func fetchTOC(bookID: String) async throws -> OnlineTOC {
+        guard let detailURL = SourceEndpoint.book(baseURL, id: bookID) else { throw SourceError.badURL }
+        let detail = try CatalogParser.detail(from: try await load(detailURL))
+        let refs = detail.chapters.compactMap { chapter -> RemoteChapterRef? in
+            guard let url = SourceEndpoint.chapter(baseURL, bookID: bookID, chapterID: chapter.id) else { return nil }
+            let title = chapter.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return RemoteChapterRef(title: title.isEmpty ? "章节" : title, url: url.absoluteString)
+        }
+        let title = detail.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return OnlineTOC(
+            title: title.isEmpty ? "未命名" : title,
+            author: detail.author,
+            chapters: refs
+        )
     }
 
     private func loadRemoteChapter(bookID: String, chapter: CatalogChapterRef) async throws -> (title: String, content: String) {
