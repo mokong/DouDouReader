@@ -729,21 +729,30 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
 
     private func applyReplaceRules(_ text: String) -> String {
         var rawContent = text
+        // 多规则串联：replaceRules 为数组，逐条按 pattern##replacement（缺省 replacement 即删除匹配）应用。
         for replaceRule in source.contentRule.replaceRules {
             let parts = replaceRule.components(separatedBy: "##").filter { !$0.isEmpty }
-            if parts.count >= 1 {
-                let pattern = parts[0]
-                let repl = parts.count > 1 ? parts[1] : ""
-                if let regex = try? NSRegularExpression(pattern: pattern) {
-                    rawContent = regex.stringByReplacingMatches(
-                        in: rawContent,
-                        range: NSRange(location: 0, length: (rawContent as NSString).length),
-                        withTemplate: repl
-                    )
-                }
+            guard let pattern = parts.first else { continue }
+            let repl = parts.count > 1 ? parts[1] : ""
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                rawContent = regex.stringByReplacingMatches(
+                    in: rawContent,
+                    range: NSRange(location: 0, length: (rawContent as NSString).length),
+                    withTemplate: repl
+                )
             }
         }
-        return rawContent
+        // 按行过滤：删掉清洗后变空的广告行/水印行，并折叠多余空行为单空行。
+        var kept: [String] = []
+        for line in rawContent.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                if kept.last?.isEmpty == false { kept.append("") }
+            } else {
+                kept.append(trimmed)
+            }
+        }
+        return kept.joined(separator: "\n")
     }
 
     // MARK: - 解析搜索结果
