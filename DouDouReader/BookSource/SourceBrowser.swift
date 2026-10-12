@@ -190,7 +190,7 @@ struct SourceBrowserView: View {
                             VStack(spacing: 4) {
                                 Button {
                                     withAnimation(.easeInOut(duration: 0.2)) {
-                                        selectedChannel = channel.title
+                                        selectedChannel = channel.id
                                         filterSelections = channel.defaultSelections()
                                     }
                                     Task { await loadDiscover() }
@@ -445,7 +445,7 @@ struct SourceBrowserView: View {
     }
 
     private var currentChannel: ExploreChannel? {
-        exploreChannels.first { $0.title == selectedChannel } ?? exploreChannels.first
+        exploreChannels.first { $0.id == selectedChannel } ?? exploreChannels.first
     }
 
     private var activeCatalog: BookCatalog? {
