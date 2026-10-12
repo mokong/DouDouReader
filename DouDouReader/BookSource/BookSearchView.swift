@@ -159,6 +159,13 @@ struct BookSearchView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        #if os(macOS)
+        .background(
+            Button("FocusSearch") { focused = true }
+                .keyboardShortcut("f", modifiers: .command)
+                .hidden()
+        )
+        #endif
     }
 
     private var historyBody: some View {
@@ -671,6 +678,7 @@ private struct SearchCover: View {
         }
         .frame(width: 46, height: 66)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .accessibilityLabel("封面：\(title.isEmpty ? "未命名" : title)")
     }
 
     private var coverLabel: some View {

@@ -953,6 +953,7 @@ struct NovelCoverView: View {
         }
         .frame(width: 68, height: 92)
         .shadow(color: .black.opacity(0.4), radius: 3, x: 0, y: 2)
+        .accessibilityLabel("书封：\(title.isEmpty ? "未命名" : title)")
     }
 
     private var titleOverlay: some View {
