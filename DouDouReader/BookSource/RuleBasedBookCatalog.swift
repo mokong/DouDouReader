@@ -147,8 +147,71 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         request.timeoutInterval = 20
         applyBrowserHeaders(to: &request, baseURL: url)
         let data = try await loadData(request: request)
-        let root = HTMLMiniParser.parse(decodeString(from: data))
+        let raw = decodeString(from: data)
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 正文接口直接返回 JSON 时，按 $.a.b[0] 极简 JSONPath 取值。
+        if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
+            let body = chapterBodyFromJSON(trimmed)
+            if !body.isEmpty {
+                return body
+            }
+        }
+        let root = HTMLMiniParser.parse(raw)
         return chapterBody(from: root)
+    }
+
+    /// 从 JSON 正文响应中按 contentRule.contentSelector（如 $.chapter.content）提取正文。
+    private func chapterBodyFromJSON(_ text: String) -> String {
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) else { return "" }
+        let selector = source.contentRule.contentSelector
+        guard !selector.isEmpty, let value = navigateJSON(json, path: selector) else { return "" }
+        let body = Self.stringFromJSONValue(value)
+        return applyReplaceRules(body).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 极简 JSONPath 导航：支持 $.a.b[0].c。字典段按 key 取，数组段按 [n] 取下标。
+    private func navigateJSON(_ json: Any, path: String) -> Any? {
+        var p = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if p.hasPrefix("$") { p = String(p.dropFirst()) }
+        if p.hasPrefix(".") { p = String(p.dropFirst()) }
+        guard !p.isEmpty else { return json }
+        var current: Any = json
+        for segment in p.components(separatedBy: ".") where !segment.isEmpty {
+            let keyRange = segment.range(of: "[")
+            let key = keyRange.map { String(segment[..<$0.lowerBound]) } ?? segment
+            if !key.isEmpty {
+                guard let dict = current as? [String: Any],
+                      let next = dict[key] else { return nil }
+                current = next
+            }
+            if let keyRange {
+                let bracketContent = segment[keyRange.upperBound...]
+                if let endBracket = bracketContent.range(of: "]") {
+                    let idxText = String(bracketContent[..<endBracket.lowerBound])
+                    if let idx = Int(idxText) {
+                        guard let arr = current as? [Any], idx >= 0, idx < arr.count else { return nil }
+                        current = arr[idx]
+                    }
+                }
+            }
+        }
+        return current
+    }
+
+    private static func stringFromJSONValue(_ value: Any) -> String {
+        if let str = value as? String {
+            return str
+        }
+        if let arr = value as? [String] {
+            return arr.filter { !$0.isEmpty }.joined(separator: "\n\n")
+        }
+        if let arr = value as? [Any] {
+            return arr.map { stringFromJSONValue($0) }
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n\n")
+        }
+        return "\(value)"
     }
 
     // MARK: - 构建搜索请求
@@ -724,23 +787,31 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             return nil
         }
 
-        var listArray: [[String: Any]] = []
-        if let array = json as? [[String: Any]] {
-            listArray = array
-        } else if let dict = json as? [String: Any] {
-            let keys = ["books", "list", "data", "results", "items"]
-            for key in keys {
-                if let sub = dict[key] as? [[String: Any]] {
-                    listArray = sub
-                    break
+        var listAny: [Any]?
+        // 优先按配置的 listSelector（如 $.data.list）导航到数组。
+        let listSel = source.searchRule.listSelector.trimmingCharacters(in: .whitespacesAndNewlines)
+        if listSel.hasPrefix("$") || listSel.hasPrefix(".") {
+            listAny = navigateJSON(json, path: listSel) as? [Any]
+        }
+        if listAny == nil {
+            if let array = json as? [Any] {
+                listAny = array
+            } else if let dict = json as? [String: Any] {
+                let keys = ["books", "list", "data", "results", "items"]
+                for key in keys {
+                    if let sub = dict[key] as? [Any] {
+                        listAny = sub
+                        break
+                    }
                 }
             }
         }
 
-        guard !listArray.isEmpty else { return nil }
+        guard let listArray = listAny, !listArray.isEmpty else { return nil }
 
         var books: [CatalogBook] = []
-        for item in listArray {
+        for itemAny in listArray {
+            guard let item = itemAny as? [String: Any] else { continue }
             let id = (item["id"] as? CustomStringConvertible)?.description
                 ?? (item["bookId"] as? CustomStringConvertible)?.description
                 ?? (item["url"] as? String) ?? UUID().uuidString
@@ -751,6 +822,6 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             books.append(CatalogBook(id: id, title: title, author: author, summary: summary))
         }
 
-        return books
+        return books.isEmpty ? nil : books
     }
 }

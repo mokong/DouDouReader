@@ -840,6 +840,14 @@ enum LogicChecks {
                 errors.append("规则书源搜索或内容抓取不符")
             }
         }
+        switch finishAsync({ try await probeJSONSource() }) {
+        case .failure(let error):
+            errors.append("JSON 接口书源测试失败：\(error)")
+        case .success(let passed):
+            if !passed {
+                errors.append("JSON 接口搜索或正文抓取不符")
+            }
+        }
         if let shuba = BookSourceLibrary.switchable(records: []).first(where: { $0.id == "preset-69shuba" }) {
             switch finishAsync({ try await probeShubaBook(recordID: shuba.id, source: shuba.source) }) {
             case .failure(let error):
@@ -1414,6 +1422,49 @@ enum LogicChecks {
             return false
         }
 
+        return true
+    }
+
+    /// 搜索走 $.data.list、正文走 $.chapter.content 的 JSON 接口源。
+    private nonisolated static func probeJSONSource() async throws -> Bool {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CatalogURLStub.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let searchJSON = "{\"data\":{\"list\":[{\"title\":\"JSON书\",\"author\":\"作者甲\",\"url\":\"https://catalog.test/j/1\"}]}}"
+        let detailHTML = "<h1>JSON书</h1><span class=\"author\">作者甲</span><div class=\"chapters\"><a href=\"/j/1/c1\">第一章</a></div>"
+        let c1JSON = "{\"chapter\":{\"content\":\"这是JSON正文内容。\"}}"
+
+        CatalogURLStub.setRoutes([
+            "/search": (200, Data(searchJSON.utf8)),
+            "/j/1": (200, Data(detailHTML.utf8)),
+            "/j/1/c1": (200, Data(c1JSON.utf8))
+        ])
+
+        let source = UniversalBookSource(
+            kind: .legado,
+            name: "JSON源",
+            sourceURL: "https://catalog.test",
+            searchRule: SourceSearchRule(
+                urlTemplate: "https://catalog.test/search?keyword={{key}}",
+                listSelector: "$.data.list"
+            ),
+            tocRule: SourceTocRule(
+                listSelector: ".chapters a",
+                nameSelector: "text",
+                urlSelector: "href"
+            ),
+            contentRule: SourceContentRule(
+                contentSelector: "$.chapter.content"
+            )
+        )
+
+        let catalog = RuleBasedBookCatalog(recordID: "json-test", source: source, session: session)
+        let found = try await catalog.search(query: "任意")
+        guard found.count == 1, found[0].title == "JSON书" else { return false }
+        let opening = try await catalog.fetchOpening(bookID: found[0].id)
+        guard opening.openingBody.contains("这是JSON正文内容。") else { return false }
         return true
     }
 
