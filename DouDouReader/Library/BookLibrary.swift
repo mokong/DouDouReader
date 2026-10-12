@@ -134,6 +134,13 @@ nonisolated struct StoredChapter: Codable, Equatable, Sendable {
     var body: String
 }
 
+/// 索引里的一行：只存元数据，正文单独落在 bodies 目录里，按正文内容寻址。
+nonisolated struct StoredChapterIndexEntry: Codable, Equatable, Sendable {
+    var i: Int
+    var t: String
+    var b: String
+}
+
 nonisolated enum StoredChapters {
     static func block(title: String, body: String) -> String {
         let cleaned = body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -178,21 +185,66 @@ nonisolated enum StoredChapters {
         return 0
     }
 
+    /// 读回全部已下载章节（含正文）。优先新格式（index.jsonl + bodies/），
+    /// 没有则读旧的整份 chapters.json 并在首次读取时一次性迁移成新格式。
     static func load(fileName: String) -> [StoredChapter] {
-        let url = sidecarURL(fileName)
-        guard let data = try? Data(contentsOf: url),
-              let items = try? JSONDecoder().decode([StoredChapter].self, from: data) else { return [] }
-        return items.sorted { $0.index < $1.index }
+        if let items = loadNewFormat(fileName), !items.isEmpty {
+            return items.sorted { $0.index < $1.index }
+        }
+        if let legacy = loadLegacyJSON(fileName), !legacy.isEmpty {
+            try? save(fileName: fileName, chapters: legacy)
+            return legacy.sorted { $0.index < $1.index }
+        }
+        return []
     }
 
+    /// 整份重写索引并补齐正文文件。只在换源 remap、首次迁移、建书时调用，
+    /// 逐章下载不走这里。
     static func save(fileName: String, chapters: [StoredChapter]) throws {
-        let ordered = chapters.sorted { $0.index < $1.index }
-        let data = try JSONEncoder().encode(ordered)
-        try data.write(to: sidecarURL(fileName), options: .atomic)
+        let dir = try makeChapDir(fileName)
+        let bodiesDir = dir.appendingPathComponent("bodies", isDirectory: true)
+        try FileManager.default.createDirectory(at: bodiesDir, withIntermediateDirectories: true)
+        var lines = ""
+        for item in chapters.sorted(by: { $0.index < $1.index }) {
+            let bodyID = bodyID(for: item.body)
+            let bodyURL = bodiesDir.appendingPathComponent("\(bodyID).body")
+            if !FileManager.default.fileExists(atPath: bodyURL.path) {
+                try Data(item.body.utf8).write(to: bodyURL, options: .atomic)
+            }
+            let entry = StoredChapterIndexEntry(i: item.index, t: item.title, b: bodyID)
+            if let line = Self.line(entry) { lines += line }
+        }
+        try Data(lines.utf8).write(to: dir.appendingPathComponent("index.jsonl"), options: .atomic)
+    }
+
+    /// 只写这一章：正文文件 + 追加一行索引。逐章下载/整本缓存走这里。
+    static func upsert(fileName: String, index: Int, title: String, body: String) throws {
+        let dir = try makeChapDir(fileName)
+        let bodiesDir = dir.appendingPathComponent("bodies", isDirectory: true)
+        try FileManager.default.createDirectory(at: bodiesDir, withIntermediateDirectories: true)
+        let bodyID = bodyID(for: body)
+        try Data(body.utf8).write(to: bodiesDir.appendingPathComponent("\(bodyID).body"), options: .atomic)
+        let entry = StoredChapterIndexEntry(i: index, t: title, b: bodyID)
+        guard let line = Self.line(entry) else { return }
+        let indexURL = dir.appendingPathComponent("index.jsonl")
+        if FileManager.default.fileExists(atPath: indexURL.path),
+           let handle = try? FileHandle(forWritingTo: indexURL) {
+            defer { try? handle.close() }
+            try? handle.seekToEnd()
+            if let data = line.data(using: .utf8) { try handle.write(contentsOf: data) }
+        } else {
+            try Data(line.utf8).write(to: indexURL, options: .atomic)
+        }
     }
 
     static func delete(fileName: String) {
-        try? FileManager.default.removeItem(at: sidecarURL(fileName))
+        try? FileManager.default.removeItem(at: chapDir(fileName))
+        try? FileManager.default.removeItem(at: legacySidecarURL(fileName))
+    }
+
+    /// 新格式索引是否已经落盘（用于判断这次打开是否属于旧格式首次迁移）。
+    static func persistedIndexExists(fileName: String) -> Bool {
+        FileManager.default.fileExists(atPath: chapDir(fileName).appendingPathComponent("index.jsonl").path)
     }
 
     /// 旧书只有连续的前几章正文，没有分章记录。按拆出来的章节当成 0、1、2… 记下。
@@ -220,8 +272,63 @@ nonisolated enum StoredChapters {
         return result.sorted { $0.index < $1.index }
     }
 
-    private static func sidecarURL(_ fileName: String) -> URL {
+    // MARK: - 内部：磁盘布局
+
+    /// 正文按内容寻址：同一章重下、换源后标题变了但正文没变，正文文件都能复用。
+    private static func bodyID(for body: String) -> String {
+        BookLibrary.hash(body)
+    }
+
+    private static func line(_ entry: StoredChapterIndexEntry) -> String? {
+        guard let data = try? JSONEncoder().encode(entry),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        return text + "\n"
+    }
+
+    private static func chapDir(_ fileName: String) -> URL {
+        let stem = (fileName as NSString).deletingPathExtension
+        return BookStorage.booksDirectory.appendingPathComponent("\(stem).chap", isDirectory: true)
+    }
+
+    private static func makeChapDir(_ fileName: String) throws -> URL {
+        let url = chapDir(fileName)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private static func legacySidecarURL(_ fileName: String) -> URL {
         BookStorage.fileURL(fileName).appendingPathExtension("chapters.json")
+    }
+
+    private static func loadNewFormat(_ fileName: String) -> [StoredChapter]? {
+        let indexURL = chapDir(fileName).appendingPathComponent("index.jsonl")
+        guard let data = try? Data(contentsOf: indexURL) else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+        // 同一 index 出现多行时，后写的覆盖先写的（重下/追加）。
+        var latest: [Int: StoredChapterIndexEntry] = [:]
+        for raw in text.split(whereSeparator: { $0.isNewline }) {
+            guard !raw.isEmpty,
+                  let lineData = String(raw).data(using: .utf8),
+                  let entry = try? JSONDecoder().decode(StoredChapterIndexEntry.self, from: lineData) else { continue }
+            latest[entry.i] = entry
+        }
+        guard !latest.isEmpty else { return nil }
+        let bodiesDir = chapDir(fileName).appendingPathComponent("bodies", isDirectory: true)
+        var items: [StoredChapter] = []
+        for entry in latest.values {
+            let bodyURL = bodiesDir.appendingPathComponent("\(entry.b).body")
+            guard let bodyData = try? Data(contentsOf: bodyURL) else { continue }
+            let body = String(decoding: bodyData, as: UTF8.self)
+            items.append(StoredChapter(index: entry.i, title: entry.t, body: body))
+        }
+        return items
+    }
+
+    private static func loadLegacyJSON(_ fileName: String) -> [StoredChapter]? {
+        let url = legacySidecarURL(fileName)
+        guard let data = try? Data(contentsOf: url),
+              let items = try? JSONDecoder().decode([StoredChapter].self, from: data) else { return nil }
+        return items
     }
 }
 

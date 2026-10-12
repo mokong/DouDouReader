@@ -599,15 +599,15 @@ struct ReaderScreen: View {
             let remoteChapters = RemoteChapterList.decode(book.remoteChapterList)
             remoteChapterTitles = remoteChapters.map(\.title)
             if !remoteChapters.isEmpty {
-                let saved = StoredChapters.load(fileName: book.fileName)
+                let hadPersistedIndex = StoredChapters.persistedIndexExists(fileName: book.fileName)
                 let items = storedChapters(from: text, remoteCount: remoteChapters.count)
                 var start = book.utf16Offset
-                if saved.isEmpty, !items.isEmpty {
+                if !hadPersistedIndex, !items.isEmpty {
+                    // 首次从旧格式/整本 txt 装配：把进度锚到章节级别，并补齐字数与哈希。
                     let index = items.contains(where: { $0.index == book.chapterIndex }) ? book.chapterIndex : items[0].index
                     start = StoredChapters.offset(of: index, in: items)
                     book.utf16Offset = start
                     let assembled = StoredChapters.assemble(items)
-                    try? BookStorage.overwrite(fileName: book.fileName, text: assembled)
                     book.totalUTF16 = (assembled as NSString).length
                     book.contentHash = BookLibrary.hash(assembled)
                     try? modelContext.save()
@@ -786,15 +786,13 @@ struct ReaderScreen: View {
                 return false
             }
             let title = chapters[index].title.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard engine.insertRemoteChapter(remoteIndex: index, title: title.isEmpty ? "第\(index + 1)章" : title, body: body) else {
+            let normalizedTitle = title.isEmpty ? "第\(index + 1)章" : title
+            guard engine.insertRemoteChapter(remoteIndex: index, title: normalizedTitle, body: body) else {
                 throw SourceError.emptyBook
             }
-            var stored = StoredChapters.load(fileName: book.fileName)
-            stored.removeAll { $0.index == index }
-            stored.append(StoredChapter(index: index, title: title.isEmpty ? "第\(index + 1)章" : title, body: body))
-            try StoredChapters.save(fileName: book.fileName, chapters: stored)
-            try BookStorage.overwrite(fileName: book.fileName, text: engine.source)
-            book.loadedChapterCount = stored.count
+            // 只落这一章的正文文件并追加一行索引，不再整写整本正文与整份 sidecar。
+            try StoredChapters.upsert(fileName: book.fileName, index: index, title: normalizedTitle, body: body)
+            book.loadedChapterCount = engine.chapters.count
             book.totalUTF16 = engine.totalUTF16
             book.contentHash = BookLibrary.hash(engine.source)
             try? modelContext.save()
