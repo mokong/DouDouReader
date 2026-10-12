@@ -987,6 +987,7 @@ struct SourceManagerView: View {
     @State private var errorText: String?
     @State private var showingImportSheet = false
     @State private var importSheetMode = 0
+    @State private var updatingID: UUID?
 
     var body: some View {
         List {
@@ -1041,6 +1042,18 @@ struct SourceManagerView: View {
                                 Text(source.name).font(.headline)
                                 Spacer()
                                 badgeFor(source: source)
+                                if !source.subscriptionURL.isEmpty, updatingID != source.id {
+                                    Button {
+                                        updatingID = source.id
+                                        Task { await checkUpdate(source: source) }
+                                    } label: {
+                                        Image(systemName: "arrow.triangle.2.circlepath")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("检查更新")
+                                } else if updatingID == source.id {
+                                    ProgressView().controlSize(.small)
+                                }
                                 Toggle("", isOn: Bindable(source).enabled)
                                     .labelsHidden()
                             }
@@ -1057,8 +1070,8 @@ struct SourceManagerView: View {
         }
         .navigationTitle("书源管理")
         .sheet(isPresented: $showingImportSheet) {
-            SourceImportSheet(initialMode: importSheetMode) { newSources in
-                importSources(newSources)
+            SourceImportSheet(initialMode: importSheetMode) { newSources, subscriptionURL in
+                importSources(newSources, subscriptionURL: subscriptionURL)
             }
         }
         .alert("书源", isPresented: errorPresented) {
@@ -1111,7 +1124,7 @@ struct SourceManagerView: View {
         address = ""
     }
 
-    private func importSources(_ parsedList: [UniversalBookSource]) {
+    private func importSources(_ parsedList: [UniversalBookSource], subscriptionURL: String = "") {
         var seenHosts = Set(sources.map { BookSourceLibrary.hostKey($0.baseURL) })
         for source in parsedList {
             let normalizedURL = source.sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1128,7 +1141,8 @@ struct SourceManagerView: View {
                 name: source.name,
                 baseURL: normalizedURL,
                 format: source.kind.rawValue,
-                rawJSON: rawJSON
+                rawJSON: rawJSON,
+                subscriptionURL: subscriptionURL
             )
             modelContext.insert(record)
         }
@@ -1141,6 +1155,27 @@ struct SourceManagerView: View {
         }
         try? modelContext.save()
     }
+
+    /// 重拉订阅地址并覆盖 rawJSON，保留 enabled 状态。
+    private func checkUpdate(source: SourceRecord) async {
+        defer { updatingID = nil }
+        do {
+            let parsed = try await BookSourceParser.fetchAndParse(from: source.subscriptionURL)
+            let targetHost = BookSourceLibrary.hostKey(source.baseURL)
+            let matched = parsed.first { BookSourceLibrary.hostKey($0.sourceURL) == targetHost } ?? parsed.first
+            guard let matched else {
+                errorText = "订阅返回的书源为空"
+                return
+            }
+            let rawJSON = (try? BookSourceParser.encode(source: matched)) ?? matched.rawJSON
+            source.rawJSON = rawJSON
+            source.name = matched.name
+            source.format = matched.kind.rawValue
+            try? modelContext.save()
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
 }
 
 // MARK: - 书源导入弹窗
@@ -1148,7 +1183,7 @@ struct SourceManagerView: View {
 struct SourceImportSheet: View {
     @Environment(\.dismiss) private var dismiss
     var initialMode: Int = 0
-    var onImport: ([UniversalBookSource]) -> Void
+    var onImport: ([UniversalBookSource], _ subscriptionURL: String) -> Void
 
     @State private var mode = 0
     @State private var textInput = ""
@@ -1159,7 +1194,7 @@ struct SourceImportSheet: View {
     @State private var selectedIDs: Set<String> = []
     @State private var presetSelectedIDs: Set<String> = Set(PresetBookSources.all.map(\.id))
 
-    init(initialMode: Int = 0, onImport: @escaping ([UniversalBookSource]) -> Void) {
+    init(initialMode: Int = 0, onImport: @escaping ([UniversalBookSource], _ subscriptionURL: String) -> Void) {
         self.initialMode = initialMode
         self.onImport = onImport
         _mode = State(initialValue: initialMode)
@@ -1206,7 +1241,7 @@ struct SourceImportSheet: View {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("确认导入 (\(selectedIDs.count))") {
                             let chosen = previewSources.filter { selectedIDs.contains($0.id) }
-                            onImport(chosen)
+                            onImport(chosen, mode == 2 ? urlInput.trimmingCharacters(in: .whitespacesAndNewlines) : "")
                             dismiss()
                         }
                         .disabled(selectedIDs.isEmpty)
@@ -1276,7 +1311,7 @@ struct SourceImportSheet: View {
             VStack {
                 Button {
                     let chosen = PresetBookSources.all.filter { presetSelectedIDs.contains($0.id) }.map(\.source)
-                    onImport(chosen)
+                    onImport(chosen, "")
                     dismiss()
                 } label: {
                     Text("立即导入所选书源 (\(presetSelectedIDs.count))")

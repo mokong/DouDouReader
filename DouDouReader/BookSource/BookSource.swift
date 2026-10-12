@@ -10,8 +10,10 @@ final class SourceRecord {
     var addedAt: Date = Date()
     var format: String = "doudou"
     var rawJSON: String = ""
+    /// 书源订阅地址。非空时管理页可「检查更新」重拉并覆盖 rawJSON。
+    var subscriptionURL: String = ""
 
-    init(name: String, baseURL: String, format: String = "doudou", rawJSON: String = "") {
+    init(name: String, baseURL: String, format: String = "doudou", rawJSON: String = "", subscriptionURL: String = "") {
         self.id = UUID()
         self.name = name
         self.baseURL = baseURL
@@ -19,6 +21,7 @@ final class SourceRecord {
         self.addedAt = Date()
         self.format = format
         self.rawJSON = rawJSON
+        self.subscriptionURL = subscriptionURL
     }
 }
 
