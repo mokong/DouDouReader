@@ -124,6 +124,11 @@ struct ReaderScreen: View {
         .onChange(of: settings.revision) { _, _ in sync(engine) }
         .onChange(of: deviceColorScheme) { _, _ in sync(engine) }
         .onChange(of: settings.keepScreenOn) { _, _ in updateIdleTimer() }
+        // 预取触发放在 reader 主视图上：bottomPanel 仅在工具栏可见时存在，
+        // 放在那里会导致默认隐藏工具栏时章末不预取。prefetchedUpTo 保证同一章不重复。
+        .onChange(of: engine.position) { _, _ in
+            prefetchNextChapterIfNeeded(engine: engine)
+        }
         .sheet(isPresented: $showCatalog) {
             CatalogSheet(
                 engine: engine,
@@ -328,7 +333,6 @@ struct ReaderScreen: View {
         .onChange(of: engine.position) { _, _ in
             guard !scrubbingChapter else { return }
             chapterScrub = Double(scrubIndex(engine))
-            prefetchNextChapterIfNeeded(engine: engine)
         }
     }
 
