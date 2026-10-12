@@ -820,6 +820,17 @@ enum LogicChecks {
             errors.append("@css: 前缀 + @href 属性抽取不符：\(cssHref.first ?? "nil")")
         }
 
+        // 3.9 || 是回退（首个非空分组胜出），, 才合并。
+        let orHTML = "<div id='content'>正文甲</div><div class='alt'>正文乙</div>"
+        let orResult = HTMLMiniParser.queryStrings(root: HTMLMiniParser.parse(orHTML), rule: "#content||.alt")
+        if orResult != ["正文甲"] {
+            errors.append("|| 回退应为首个非空分组，实际：\(orResult)")
+        }
+        let commaMerge = HTMLMiniParser.queryStrings(root: HTMLMiniParser.parse(orHTML), rule: "#content,.alt")
+        if commaMerge != ["正文甲", "正文乙"] {
+            errors.append(", 仍应合并所有命中，实际：\(commaMerge)")
+        }
+
         // 4. 测试 RuleBasedBookCatalog 端到端链路与网络模拟
         switch finishAsync({ try await probeRuleCatalog() }) {
         case .failure(let error):

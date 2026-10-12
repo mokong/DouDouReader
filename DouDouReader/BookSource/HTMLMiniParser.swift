@@ -269,11 +269,24 @@ nonisolated enum HTMLMiniParser {
     /// 从 HTML 根节点执行单条规则，返回提取到的所有文本或属性字符串。
     /// 逗号和 `||` 表示多条候选规则，按书写顺序合并。
     static func queryStrings(root: HTMLNode, rule: String) -> [String] {
-        let alternatives = splitRuleAlternatives(rule)
+        // Legado 语义：顶层 || 是回退，依次执行首个有结果的分组胜出；, 才做合并。
+        let groups = splitTopLevel(rule, sep: "||")
+        for group in groups {
+            let result = queryStringsGroup(root: root, rule: group)
+            if !result.isEmpty {
+                return result
+            }
+        }
+        return []
+    }
+
+    /// 单个回退分组内部：按 , 合并所有命中。
+    private static func queryStringsGroup(root: HTMLNode, rule: String) -> [String] {
+        let alternatives = splitTopLevel(rule, sep: ",")
         if alternatives.count > 1 {
             var merged: [String] = []
             for alternative in alternatives {
-                merged.append(contentsOf: queryStrings(root: root, rule: alternative))
+                merged.append(contentsOf: queryStringsGroup(root: root, rule: alternative))
             }
             return merged
         }
@@ -323,12 +336,24 @@ nonisolated enum HTMLMiniParser {
 
     /// 从 HTML 节点执行规则，返回匹配到的所有 HTMLNode 节点（常用于列表规则，如 bookList / chapterList）
     static func queryNodes(root: HTMLNode, rule: String) -> [HTMLNode] {
-        let alternatives = splitRuleAlternatives(rule)
+        // 列表规则同样：|| 回退取首个非空分组，, 合并。
+        let groups = splitTopLevel(rule, sep: "||")
+        for group in groups {
+            let result = queryNodesGroup(root: root, rule: group)
+            if !result.isEmpty {
+                return result
+            }
+        }
+        return []
+    }
+
+    private static func queryNodesGroup(root: HTMLNode, rule: String) -> [HTMLNode] {
+        let alternatives = splitTopLevel(rule, sep: ",")
         if alternatives.count > 1 {
             var merged: [HTMLNode] = []
             var seen = Set<ObjectIdentifier>()
             for alternative in alternatives {
-                for node in queryNodes(root: root, rule: alternative) {
+                for node in queryNodesGroup(root: root, rule: alternative) {
                     let identity = ObjectIdentifier(node)
                     if seen.insert(identity).inserted {
                         merged.append(node)
@@ -346,8 +371,9 @@ nonisolated enum HTMLMiniParser {
         return selectNodes(root: root, selector: cleanRule)
     }
 
-    /// 拆开「甲, 乙」和「甲||乙」。括号、引号和 `##正则##` 里的逗号保持原样。
-    private static func splitRuleAlternatives(_ rule: String) -> [String] {
+    /// 按顶层分隔符拆分规则。sep 传 ","（合并）或 "||"（回退）。
+    /// 括号、引号和 `##正则##` 里的分隔符保持原样。
+    private static func splitTopLevel(_ rule: String, sep: String) -> [String] {
         var parts: [String] = []
         var current = ""
         var brackets = 0
@@ -383,16 +409,18 @@ nonisolated enum HTMLMiniParser {
                 else if char == "]" { brackets = max(0, brackets - 1) }
                 else if char == "(" { parens += 1 }
                 else if char == ")" { parens = max(0, parens - 1) }
-                else if brackets == 0 && parens == 0 && char == "," {
-                    appendAlternative(current, to: &parts)
-                    current = ""
-                    index += 1
-                    continue
-                } else if brackets == 0 && parens == 0 && char == "|", index + 1 < chars.count, chars[index + 1] == "|" {
-                    appendAlternative(current, to: &parts)
-                    current = ""
-                    index += 2
-                    continue
+                else if brackets == 0 && parens == 0 {
+                    if sep == ",", char == "," {
+                        appendAlternative(current, to: &parts)
+                        current = ""
+                        index += 1
+                        continue
+                    } else if sep == "||", char == "|", index + 1 < chars.count, chars[index + 1] == "|" {
+                        appendAlternative(current, to: &parts)
+                        current = ""
+                        index += 2
+                        continue
+                    }
                 }
             }
             current.append(char)
