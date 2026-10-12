@@ -763,6 +763,21 @@ enum LogicChecks {
             errors.append("逗号选择器没有分别匹配：\(commaNodes.count)")
         }
 
+        // 3.5 @js: 规则字面量提取：纯 @js: 不应被整体丢弃。
+        let jsReturn = HTMLMiniParser.queryStrings(root: dom, rule: "@js:return 'https://site.test/ch/1'").first
+        if jsReturn != "https://site.test/ch/1" {
+            errors.append("@js: return 字面量提取不符：\(jsReturn ?? "nil")")
+        }
+        let jsURL = HTMLMiniParser.queryStrings(root: dom, rule: "@js:result = 'https://direct.test/x';").first
+        if jsURL != "https://direct.test/x" {
+            errors.append("@js: 字面 URL 提取不符：\(jsURL ?? "nil")")
+        }
+        // 带选择器主体 + @js: 后缀时，选择器照常执行、JS 部分跳过。
+        let withSelector = HTMLMiniParser.queryStrings(root: dom, rule: "a@text||@js:result.title").first
+        if withSelector?.contains("灯塔") != true && withSelector?.contains("第二本") != true {
+            errors.append("@js: 后缀附加在选择器后未保留选择器结果：\(withSelector ?? "nil")")
+        }
+
         // 4. 测试 RuleBasedBookCatalog 端到端链路与网络模拟
         switch finishAsync({ try await probeRuleCatalog() }) {
         case .failure(let error):

@@ -278,7 +278,11 @@ nonisolated enum HTMLMiniParser {
             return merged
         }
 
-        let (cleanRule, targetAttr, regexReplace) = parseRuleSyntax(rule)
+        let (cleanRule, targetAttr, regexReplace, literal) = parseRuleSyntax(rule)
+        // 整条规则就是 @js: 表达式时，返回从中提取出的字面量（URL 或 return 'xxx'）。
+        if let literal {
+            return applyRegex(regexReplace, to: [literal])
+        }
         let nodes = selectNodes(root: root, selector: cleanRule)
 
         var results: [String] = []
@@ -296,18 +300,25 @@ nonisolated enum HTMLMiniParser {
         }
 
         if let (pattern, replacement) = regexReplace {
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                results = results.map { str in
-                    regex.stringByReplacingMatches(
-                        in: str,
-                        range: NSRange(location: 0, length: (str as NSString).length),
-                        withTemplate: replacement
-                    )
-                }
-            }
+            results = applyRegex((pattern, replacement), to: results)
         }
 
         return results.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    /// 统一执行 ##正则##替换。
+    private static func applyRegex(_ pair: (String, String)?, to input: [String]) -> [String] {
+        guard let (pattern, replacement) = pair,
+              let regex = try? NSRegularExpression(pattern: pattern) else {
+            return input
+        }
+        return input.map { str in
+            regex.stringByReplacingMatches(
+                in: str,
+                range: NSRange(location: 0, length: (str as NSString).length),
+                withTemplate: replacement
+            )
+        }
     }
 
     /// 从 HTML 节点执行规则，返回匹配到的所有 HTMLNode 节点（常用于列表规则，如 bookList / chapterList）
@@ -327,7 +338,11 @@ nonisolated enum HTMLMiniParser {
             return merged
         }
 
-        let (cleanRule, _, _) = parseRuleSyntax(rule)
+        let (cleanRule, _, _, literal) = parseRuleSyntax(rule)
+        // 纯 @js: 列表规则无法映射成 DOM 节点，直接返回空，避免退化成整棵树。
+        if literal != nil {
+            return []
+        }
         return selectNodes(root: root, selector: cleanRule)
     }
 
@@ -395,7 +410,7 @@ nonisolated enum HTMLMiniParser {
     }
 
     /// 解析规则中的属性抽取符号（如 @text, @href, /text(), /@href, Jsoup @）及正则替换（##regex##replace）
-    static func parseRuleSyntax(_ raw: String) -> (cleanSelector: String, targetAttr: String?, regexReplace: (String, String)?) {
+    static func parseRuleSyntax(_ raw: String) -> (cleanSelector: String, targetAttr: String?, regexReplace: (String, String)?, literal: String?) {
         var working = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 1. 检查是否存在 ##regex##replace
@@ -413,12 +428,18 @@ nonisolated enum HTMLMiniParser {
         }
 
         // 2. 检查是否有 @js: 或 || @js: 规则（去掉后缀代码，保留主体选择器）
+        var jsLiteral: String? = nil
         if let jsRange = working.range(of: "@js:") {
+            let jsBody = String(working[jsRange.upperBound...])
             working = String(working[..<jsRange.lowerBound])
             if working.hasSuffix("||") {
                 working = String(working.dropLast(2))
             }
             working = working.trimmingCharacters(in: .whitespacesAndNewlines)
+            // 整条规则就是 @js: 表达式时，提取字面 URL 或 return 'xxx' 字面量，避免整条规则失效。
+            if working.isEmpty {
+                jsLiteral = extractJSLiteral(jsBody)
+            }
         }
 
         // 3. 提取末尾的属性选择器，如 @href, @text, /@href, /text(), ::text
@@ -448,16 +469,32 @@ nonisolated enum HTMLMiniParser {
 
         // 如果规则直接就是 "text" 或 "href" 等简短属性
         if working.isEmpty && targetAttr != nil {
-            return ("", targetAttr, regexReplace)
+            return ("", targetAttr, regexReplace, jsLiteral)
         }
         if working.lowercased() == "text" || working.lowercased() == "text()" {
-            return ("", "text", regexReplace)
+            return ("", "text", regexReplace, jsLiteral)
         }
         if working.lowercased() == "href" || working.lowercased() == "src" {
-            return ("", working.lowercased(), regexReplace)
+            return ("", working.lowercased(), regexReplace, jsLiteral)
         }
 
-        return (working.trimmingCharacters(in: .whitespacesAndNewlines), targetAttr, regexReplace)
+        return (working.trimmingCharacters(in: .whitespacesAndNewlines), targetAttr, regexReplace, jsLiteral)
+    }
+
+    /// 从 @js: 代码体中提取高频字面量：return 'xxx' / return "xxx"，或第一个字面 URL。
+    private static func extractJSLiteral(_ js: String) -> String? {
+        let returnPattern = #"return\s*['"]([^'"]*)['"]"#
+        if let regex = try? NSRegularExpression(pattern: returnPattern),
+           let match = regex.firstMatch(in: js, range: NSRange(js.startIndex..., in: js)) {
+            let value = (js as NSString).substring(with: match.range(at: 1))
+            if !value.isEmpty {
+                return value
+            }
+        }
+        if let urlRange = js.range(of: #"https?://[^\s'"<>\\]+"#, options: .regularExpression) {
+            return String(js[urlRange])
+        }
+        return nil
     }
 
     /// 执行通用路径选择（支持 XPath 路径、CSS 路径与 Jsoup 路径）
