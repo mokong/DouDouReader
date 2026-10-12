@@ -824,6 +824,9 @@ struct ReaderScreen: View {
                 engine.retryCurrentChapter()
             }
             if canSwitchSource {
+                Button("自动换源") {
+                    Task { await autoSwitchSource(engine: engine) }
+                }
                 Button("换源") {
                     presentSourceSwitch(preferring: failedChapterTitle(engine))
                 }
@@ -831,6 +834,36 @@ struct ReaderScreen: View {
         }
         .buttonStyle(.bordered)
         .tint(theme.text.color)
+    }
+
+    /// 自动换源：跨其它可用书源搜索当前书名，取首个命中直接切换。
+    private func autoSwitchSource(engine: ReaderEngine) async {
+        switchChapterTitle = failedChapterTitle(engine)
+        let records = (try? modelContext.fetch(FetchDescriptor<SourceRecord>())) ?? []
+        let sources = BookSourceLibrary.switchable(records: records)
+            .filter { $0.id != book.remoteSourceID }
+        guard !sources.isEmpty else {
+            chapterMoveError = "没有其它可用书源"
+            return
+        }
+        var batches: [SourceSearchBatch] = []
+        let stream = BookSearch.updates(query: book.title, sources: sources)
+        for await batch in stream { batches.append(batch) }
+        let hits = BookSearch.switchHits(
+            title: book.title,
+            author: book.author,
+            excludingSourceID: book.remoteSourceID,
+            excludingBookID: book.remoteBookID,
+            batches: batches
+        )
+        guard let hit = hits.first,
+              let source = sources.first(where: { $0.id == hit.sourceID }) else {
+            chapterMoveError = "自动换源：其它书源没有这本书"
+            return
+        }
+        if let error = await switchSource(to: source, hit: hit.book) {
+            chapterMoveError = error
+        }
     }
 
     private func failedChapterTitle(_ engine: ReaderEngine) -> String {
