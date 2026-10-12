@@ -279,7 +279,8 @@ nonisolated struct RemoteBookCatalog: IncrementalBookCatalog {
     var id: String
     var name: String
     var baseURL: URL
-    var session: URLSession = .shared
+    /// 复用与规则书源一致的 URLCache + 共享 Cookie 会话。
+    var session: URLSession = RuleBasedBookCatalog.configuredSession
 
     func search(query: String) async throws -> [CatalogBook] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
