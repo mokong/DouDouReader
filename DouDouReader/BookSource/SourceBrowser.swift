@@ -770,10 +770,6 @@ struct SwitchSiteSheet: View {
                     .padding(.vertical, 10)
                 }
                 .background(Color.black.ignoresSafeArea())
-
-                // 右侧快速分类索引栏（参考截图 2：Top | 文 | 图 | 音 | 视）
-                rightFastIndexBar
-                    .padding(.trailing, 4)
             }
             .navigationDestination(isPresented: $showingManager) {
                 SourceManagerView()
@@ -812,25 +808,6 @@ struct SwitchSiteSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-
-    // MARK: - 右侧索引栏（参考截图 2）
-
-    private var rightFastIndexBar: some View {
-        VStack(spacing: 4) {
-            Text("Top").font(.system(size: 10, weight: .medium))
-            Text("|").font(.system(size: 9)).opacity(0.5)
-            Text("文").font(.system(size: 11, weight: .medium))
-            Text("|").font(.system(size: 9)).opacity(0.5)
-            Text("图").font(.system(size: 11, weight: .medium))
-            Text("|").font(.system(size: 9)).opacity(0.5)
-            Text("音").font(.system(size: 11, weight: .medium))
-            Text("|").font(.system(size: 9)).opacity(0.5)
-            Text("视").font(.system(size: 11, weight: .medium))
-        }
-        .foregroundColor(Color.white.opacity(0.45))
-        .padding(.vertical, 8)
-        .padding(.horizontal, 4)
     }
 
     // MARK: - 数据分组与过滤
