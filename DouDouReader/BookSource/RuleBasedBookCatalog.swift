@@ -22,8 +22,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
 
         let (request, detectedCharset) = try buildSearchRequest(needle: needle)
 
-        let data = try await loadData(request: request)
-        let htmlOrJSON = decodeString(from: data, preferredCharset: detectedCharset)
+        let (data, response) = try await loadData(request: request)
+        let htmlOrJSON = decode(data, response: response, preferredCharset: detectedCharset)
 
         // 优先尝试作为 JSON 响应解析
         if let jsonBooks = tryParseJSONSearchResults(htmlOrJSON) {
@@ -51,10 +51,10 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         request.httpMethod = "GET"
         applyBrowserHeaders(to: &request, baseURL: url)
 
-        let data = try await loadData(request: request)
+        let (data, response) = try await loadData(request: request)
         let prefersGBK = source.rawJSON.lowercased().contains("gbk")
             || source.searchRule.urlTemplate.lowercased().contains("gbk")
-        let text = decodeString(from: data, preferredCharset: prefersGBK ? "gbk" : nil)
+        let text = decode(data, response: response, preferredCharset: prefersGBK ? "gbk" : nil)
         if let jsonBooks = tryParseJSONSearchResults(text) {
             return jsonBooks
         }
@@ -129,8 +129,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         detailRequest.timeoutInterval = 20
         applyBrowserHeaders(to: &detailRequest, baseURL: bookURL)
 
-        let detailData = try await loadData(request: detailRequest)
-        let detailHtml = decodeString(from: detailData)
+        let (detailData, detailResponse) = try await loadData(request: detailRequest)
+        let detailHtml = decode(detailData, response: detailResponse)
         let detailRoot = HTMLMiniParser.parse(detailHtml)
 
         let title = HTMLMiniParser.queryStrings(root: detailRoot, rule: "//h1/text()").first
@@ -147,7 +147,7 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         request.timeoutInterval = 20
         applyBrowserHeaders(to: &request, baseURL: url)
         let data = try await loadData(request: request)
-        let raw = decodeString(from: data)
+        let raw = decode(data.0, response: data.1)
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         // 正文接口直接返回 JSON 时，按 $.a.b[0] 极简 JSONPath 取值。
         if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
@@ -334,7 +334,7 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         }
     }
 
-    private func loadData(request: URLRequest) async throws -> Data {
+    private func loadData(request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let data: Data
         let response: URLResponse
         let host = request.url?.host ?? "书源服务器"
@@ -386,7 +386,7 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             throw SourceError.detailedBadResponse("HTTP 状态码 \(http.statusCode)")
         }
 
-        return data
+        return (data, http)
     }
 
     // MARK: - 辅助方法
@@ -435,15 +435,19 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         }.joined()
     }
 
-    private func decodeString(from data: Data, preferredCharset: String? = nil) -> String {
+    /// 三层编码判定：①响应头 Content-Type charset ②HTML 全文 meta charset ③UTF-8 严格解码失败再回退 GBK。
+    private func decode(_ data: Data, response: HTTPURLResponse? = nil, preferredCharset: String? = nil) -> String {
         let gbkEncoding = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))
-        let sniffed = sniffCharset(data)
-        let preferred = sniffed ?? preferredCharset
+        let header = response?.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+        let meta = sniffCharset(data)
 
-        if let preferred = preferred?.lowercased(), preferred.contains("gb") {
-            if let gbk = String(data: data, encoding: String.Encoding(rawValue: gbkEncoding)) {
-                return gbk
-            }
+        // 任一来源声明 GBK，就优先按 GBK 解，避免先按 UTF-8 把汉字解坏。
+        let signaledGB = meta == "gbk"
+            || header.contains("gb")
+            || (preferredCharset?.lowercased().contains("gb") ?? false)
+        if signaledGB,
+           let gbk = String(data: data, encoding: String.Encoding(rawValue: gbkEncoding)) {
+            return gbk
         }
 
         if let utf8 = String(data: data, encoding: .utf8) {
@@ -457,13 +461,17 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// 页头的 charset 是 ASCII。69书吧正文是 GBK，不能先按 UTF-8 把汉字解坏。
+    /// 全文（前 256KB）扫描 meta charset，不再只看前 4096 字节。返回 "gbk"/"utf-8"/nil。
     private func sniffCharset(_ data: Data) -> String? {
-        guard let head = String(data: data.prefix(4096), encoding: .isoLatin1)?.lowercased() else {
+        guard let text = String(data: data, encoding: .isoLatin1)?.lowercased() else {
             return nil
         }
-        if head.range(of: #"charset\s*=\s*["']?gb(k|2312|18030)"#, options: .regularExpression) != nil {
+        let scan = String(text.prefix(256_000))
+        if scan.range(of: #"charset\s*=\s*["']?gb(k|2312|18030)"#, options: .regularExpression) != nil {
             return "gbk"
+        }
+        if scan.range(of: #"charset\s*=\s*["']?utf-?8"#, options: .regularExpression) != nil {
+            return "utf-8"
         }
         return nil
     }
@@ -480,8 +488,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
                     var request = URLRequest(url: candidate)
                     request.timeoutInterval = 20
                     applyBrowserHeaders(to: &request, baseURL: candidate)
-                    let data = try await loadData(request: request)
-                    root = HTMLMiniParser.parse(decodeString(from: data))
+                    let (data, chapterResponse) = try await loadData(request: request)
+                    root = HTMLMiniParser.parse(decode(data, response: chapterResponse))
                 } catch let error as SourceError {
                     if case .notFound = error { continue }
                     transport = error
