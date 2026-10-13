@@ -310,16 +310,6 @@ struct ReaderScreen: View {
 
     private func bottomPanel(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
         VStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "sun.min")
-                    .font(.caption)
-                    .foregroundStyle(theme.secondary.color)
-                Slider(value: brightnessBinding, in: 0.45...1)
-                    .tint(theme.text.color)
-                Image(systemName: "sun.max")
-                    .font(.caption)
-                    .foregroundStyle(theme.secondary.color)
-            }
             chapterScrubber(engine, theme: theme)
             HStack(spacing: 0) {
                 barButton("目录", systemImage: "list.bullet") { showCatalog = true }
@@ -493,13 +483,6 @@ struct ReaderScreen: View {
         if engine.speech.isActive { return engine.speech.isPaused ? "speaker.slash" : "headphones" }
         if engine.isAutoReading { return "timer" }
         return "headphones"
-    }
-
-    private var brightnessBinding: Binding<Double> {
-        Binding(
-            get: { settings.brightness },
-            set: { settings.brightness = $0 }
-        )
     }
 
     private func toggleNight() {
