@@ -125,6 +125,7 @@ struct BookshelfView: View {
     @State private var checkingUpdates = false
     @State private var updatingBookIDs: Set<UUID> = []
     @State private var showCacheManage = false
+    @State private var didAutoCheck = false
 
     private var sort: ShelfSort { ShelfSort(rawValue: sortRaw) ?? .recent }
     private var showsGrid: Bool { layoutRaw != "list" }
@@ -157,6 +158,9 @@ struct BookshelfView: View {
                         }
                     }
                     .padding(16)
+                }
+                .refreshable {
+                    await checkAllUpdates()
                 }
             }
             .geometryGroup()
@@ -226,6 +230,11 @@ struct BookshelfView: View {
         .onAppear {
             LogicChecks.exitIfRequested()
             try? BookLibrary.collapseOnlineDuplicates(context: modelContext)
+            // 每次冷启动自动静默检查一次书架更新，有新章节的书自动打上角标。
+            if !didAutoCheck {
+                didAutoCheck = true
+                Task { await checkAllUpdates(silent: true) }
+            }
             if ProcessInfo.processInfo.arguments.contains("-openSearch") {
                 openSearch()
             }
@@ -478,7 +487,7 @@ struct BookshelfView: View {
         }
     }
 
-    private func checkUpdate(book: BookRecord) async {
+    private func checkUpdate(book: BookRecord, silent: Bool = false) async {
         updatingBookIDs.insert(book.id)
         defer { updatingBookIDs.remove(book.id) }
 
@@ -488,7 +497,7 @@ struct BookshelfView: View {
             book.lastCheckMessage = "书源失效，请换源"
             book.updateAvailable = false
             try? modelContext.save()
-            notice = "《\(book.title)》书源失效，请换源"
+            if !silent { notice = "《\(book.title)》书源失效，请换源" }
             return
         }
 
@@ -506,29 +515,31 @@ struct BookshelfView: View {
             book.lastCheckMessage = "书源失效，请换源"
             book.updateAvailable = false
             try? modelContext.save()
-            notice = "《\(book.title)》检查失败：\(friendlyCheckError(error))"
+            if !silent { notice = "《\(book.title)》检查失败：\(friendlyCheckError(error))" }
         }
     }
 
-    private func checkAllUpdates() async {
+    private func checkAllUpdates(silent: Bool = false) async {
         checkingUpdates = true
         defer { checkingUpdates = false }
         let online = visibleBooks.filter { !$0.remoteBookID.isEmpty }
         guard !online.isEmpty else {
-            notice = "书架上没有需要检查的在线书"
+            if !silent { notice = "书架上没有需要检查的在线书" }
             return
         }
         var updated = 0
         var failed = 0
         for book in online {
-            await checkUpdate(book: book)
+            await checkUpdate(book: book, silent: silent)
             if book.updateAvailable {
                 updated += 1
             } else if book.lastCheckMessage == "书源失效，请换源" {
                 failed += 1
             }
         }
-        notice = "检查完成：\(updated) 本有更新\(failed > 0 ? "，\(failed) 本书源失效" : "")"
+        if !silent {
+            notice = "检查完成：\(updated) 本有更新\(failed > 0 ? "，\(failed) 本书源失效" : "")"
+        }
     }
 
     private func friendlyCheckError(_ error: Error) -> String {
