@@ -638,11 +638,27 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         if entries.contains(where: { $0.sort != nil }) {
             entries.sort { ($0.sort ?? Int.max) < ($1.sort ?? Int.max) }
         }
-        let ordered = entries.map { ($0.title, $0.url) }
+        var ordered = entries.map { ($0.title, $0.url) }
+        // 没有 data-num 时，站点常把最新章放最前、第1章压在末尾；识别到第1章在末尾就整体翻正序。
+        if !entries.contains(where: { $0.sort != nil }) {
+            ordered = normalizeAscending(ordered)
+        }
         if source.tocRule.startAtFirstChapter {
             return openingChapterOrder(ordered)
         }
         return ordered
+    }
+
+    /// 站点目录可能按更新倒序（最新章在前、第1章在后）。
+    /// 开头不是第1章而末尾是第1章时，整份翻回正序，保证 remoteIndex 0 是第一章。
+    private func normalizeAscending(_ entries: [(title: String, url: URL)]) -> [(title: String, url: URL)] {
+        guard entries.count >= 2 else { return entries }
+        let firstIsOpening = RemoteChapterList.looksLikeOpening(entries[0].title)
+        let lastIsOpening = RemoteChapterList.looksLikeOpening(entries[entries.count - 1].title)
+        if !firstIsOpening, lastIsOpening {
+            return entries.reversed()
+        }
+        return entries
     }
 
     /// 最新章节横幅通常只有几条，紧跟着才是从第1章排到接近最新章的正文目录。

@@ -260,10 +260,16 @@ struct CatalogSheet: View {
     }
 
     private var currentMarker: Int? {
-        guard !engine.isTerminal(engine.position),
-              engine.chapters.indices.contains(engine.position.chapterIndex) else { return nil }
-        let chapter = engine.chapters[engine.position.chapterIndex]
-        return remoteTitles.isEmpty ? chapter.index : chapter.remoteIndex
+        if !engine.isTerminal(engine.position),
+           engine.chapters.indices.contains(engine.position.chapterIndex) {
+            let chapter = engine.chapters[engine.position.chapterIndex]
+            return remoteTitles.isEmpty ? chapter.index : chapter.remoteIndex
+        }
+        // 停在末尾页（刚读完最新章）：定位到已下载的最后一章，而不是列表开头。
+        if let last = engine.chapters.last {
+            return remoteTitles.isEmpty ? last.index : last.remoteIndex
+        }
+        return nil
     }
 
     var body: some View {

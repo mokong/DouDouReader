@@ -672,11 +672,19 @@ struct ReaderScreen: View {
                 book.lastReadAt = Date()
                 try? modelContext.save()
             }
-            let remoteChapters = RemoteChapterList.decode(book.remoteChapterList)
+            let persisted = RemoteChapterList.decode(book.remoteChapterList)
+            // 旧书本地目录可能是倒序存的，打开时统一翻正序，并回写纠正。
+            let remoteChapters = RemoteChapterList.normalizedAscending(persisted)
+            if remoteChapters.count == persisted.count,
+               remoteChapters.map(\.url) != persisted.map(\.url) {
+                book.remoteChapterList = RemoteChapterList.encode(remoteChapters)
+            }
             remoteChapterTitles = remoteChapters.map(\.title)
             if !remoteChapters.isEmpty {
                 let hadPersistedIndex = StoredChapters.persistedIndexExists(fileName: book.fileName)
-                let items = storedChapters(from: text, remoteCount: remoteChapters.count)
+                // 书源目录顺序归一后，按章节标题把已缓存章节重对到新目录下标，避免旧倒序数据下标错位。
+                var items = storedChapters(from: text, remoteCount: remoteChapters.count)
+                items = StoredChapters.remap(items, onto: remoteChapters)
                 var start = book.utf16Offset
                 if !hadPersistedIndex, !items.isEmpty {
                     // 首次从旧格式/整本 txt 装配：把进度锚到章节级别，并补齐字数与哈希。

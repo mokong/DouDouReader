@@ -366,6 +366,29 @@ enum RemoteChapterList {
         }
         return chapters
     }
+
+    /// 站点目录可能按更新倒序（最新章在前、第1章在后）。
+    /// 检测到开头不是第1章、而末尾是第1章时，整份翻回正序，保证下标 0 是第一章。
+    static func normalizedAscending(_ chapters: [RemoteChapterRef]) -> [RemoteChapterRef] {
+        guard chapters.count >= 2 else { return chapters }
+        if !looksLikeOpening(chapters[0].title), looksLikeOpening(chapters[chapters.count - 1].title) {
+            return chapters.reversed()
+        }
+        return chapters
+    }
+
+    /// 是否像「第1章 / 第一章 / 序章 / 楔子」这类开头章节。
+    static func looksLikeOpening(_ raw: String) -> Bool {
+        let compact = raw.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }
+        var text = String(String.UnicodeScalarView(compact))
+        if let range = text.range(of: #"^\d+[\.、]"#, options: .regularExpression) {
+            text.removeSubrange(range)
+        }
+        return text.range(
+            of: #"^(序章|楔子|前言|引子|第[0０]*[1１一][章节回节])"#,
+            options: .regularExpression
+        ) != nil
+    }
 }
 
 enum BookLibrary {
