@@ -88,7 +88,7 @@ struct ReaderScreen: View {
                     .allowsHitTesting(false)
             }
             .overlay {
-                if engine.isChapterLoadFailed {
+                if engine.isChapterLoadFailed || engine.showEndActions {
                     chapterFailureActions(engine, theme: theme)
                         .offset(y: 44)
                 }
@@ -702,6 +702,12 @@ struct ReaderScreen: View {
                         await self.loadRemoteChapter(index, into: rebuilt, jumpAfter: false)
                     }
                 }
+                rebuilt.onNeedRefreshCatalog = { [weak rebuilt] in
+                    guard let rebuilt else { return }
+                    Task { @MainActor in
+                        await self.refreshCatalogAndContinue(into: rebuilt)
+                    }
+                }
                 rebuilt.applySettings(settings, interfaceDark: deviceColorScheme == .dark)
                 engine = rebuilt
                 updateIdleTimer()
@@ -772,6 +778,42 @@ struct ReaderScreen: View {
 
     private func loadNextChapter(into engine: ReaderEngine) async {
         _ = await loadRemoteChapter(book.loadedChapterCount, into: engine, jumpAfter: false, generation: nil)
+    }
+
+    /// 读到目录末尾时，向书源重新拉一次目录：发现新章节就继续往下读，没有或失败则在末尾页提示重试/换源。
+    private func refreshCatalogAndContinue(into engine: ReaderEngine) async {
+        guard engine.remoteChapterCount > 0, !book.remoteBookID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            engine.catalogRefreshing = false
+            return
+        }
+        let oldList = RemoteChapterList.decode(book.remoteChapterList)
+        do {
+            let records = (try? modelContext.fetch(FetchDescriptor<SourceRecord>())) ?? []
+            guard let item = BookSourceLibrary.switchable(records: records).first(where: { $0.id == book.remoteSourceID }),
+                  let catalog = BookSourceLibrary.catalog(for: item) as? IncrementalBookCatalog else {
+                throw SourceError.unreachable
+            }
+            let toc = try await catalog.fetchTOC(bookID: book.remoteBookID)
+            if Task.isCancelled { return }
+            let outcome = BookUpdateComparison.compare(local: oldList, remote: toc.chapters)
+            // 落库最新目录，刷新阅读器已知总章数。
+            book.remoteChapterList = RemoteChapterList.encode(toc.chapters)
+            remoteChapterTitles = toc.chapters.map(\.title)
+            engine.remoteChapterCount = toc.chapters.count
+            try? modelContext.save()
+            engine.catalogRefreshing = false
+            engine.catalogRefreshFailed = false
+            // 有新章节：从旧目录的下一章开始继续下载并跳进去读。
+            if outcome.newChapterCount > 0 {
+                let nextRemote = oldList.count
+                if toc.chapters.indices.contains(nextRemote) {
+                    _ = await loadRemoteChapter(nextRemote, into: engine, jumpAfter: true, generation: nil)
+                }
+            }
+        } catch {
+            engine.catalogRefreshing = false
+            engine.catalogRefreshFailed = true
+        }
     }
 
     /// 距本章末尾约 2 页（或本章仅 1 页）时，后台静默预取下一章，失败不打扰阅读。
@@ -907,7 +949,11 @@ struct ReaderScreen: View {
     private func chapterFailureActions(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
         HStack(spacing: 16) {
             Button("重试") {
-                engine.retryCurrentChapter()
+                if engine.isChapterLoadFailed {
+                    engine.retryCurrentChapter()
+                } else {
+                    engine.retryCatalogRefresh()
+                }
             }
             if canSwitchSource {
                 Button("自动换源") {

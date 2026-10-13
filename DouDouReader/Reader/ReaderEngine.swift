@@ -29,9 +29,16 @@ final class ReaderEngine {
     var remoteChapterCount = 0
     @ObservationIgnored var onNeedNextChapter: (() -> Void)?
     @ObservationIgnored var onNeedRemoteChapter: ((Int) -> Void)?
+    /// 读到目录末尾时，向书源重新拉一次目录，看是否有新更新的章节。
+    @ObservationIgnored var onNeedRefreshCatalog: (() -> Void)?
     @ObservationIgnored private var askedForNext = false
     @ObservationIgnored private var nextChapterFailed = false
     @ObservationIgnored private var failedAt: ReaderPosition?
+    @ObservationIgnored private var askedForCatalogRefresh = false
+    /// 正在向书源拉最新目录（读到末尾时）。
+    var catalogRefreshing = false
+    /// 拉目录失败（网络/书源问题），末尾页展示重试/换源。
+    var catalogRefreshFailed = false
 
     private(set) var position = ReaderPosition(chapterIndex: 0, pageIndex: 0)
     @ObservationIgnored private(set) var anchorOffset: Int
@@ -157,12 +164,36 @@ final class ReaderEngine {
 
     var endTitle: String {
         if nextChapterFailed { return "下一章加载失败" }
-        return hasUnloadedChapters ? "正在加载下一章" : "全书完"
+        if catalogRefreshing { return "正在检查更新…" }
+        if catalogRefreshFailed { return "检查更新失败" }
+        if hasUnloadedChapters { return "正在加载下一章" }
+        return "已经读到最新章节"
     }
 
     var endDetail: String {
         if nextChapterFailed { return "返回后再次翻页" }
-        return hasUnloadedChapters ? "请稍等" : "这本读完了"
+        if catalogRefreshing { return "正在从书源拉取最新目录" }
+        if catalogRefreshFailed { return "网络或书源异常，点下方按钮重试或换源" }
+        if hasUnloadedChapters { return "请稍等" }
+        return "点「重试」再检查一次更新，或换源"
+    }
+
+    /// 是否在末尾页展示「重试 / 换源」操作：下载失败、目录刷新失败、或已读到最新。
+    var showEndActions: Bool {
+        if nextChapterFailed { return true }
+        guard position.boundaryRemote == nil, position.chapterIndex >= chapters.count else { return false }
+        // 正在拉目录时不抢操作，拉完（成功/失败/无更新）再给按钮。
+        return !catalogRefreshing
+    }
+
+    /// 末尾页「重试」：重新向书源拉一次目录。
+    func retryCatalogRefresh() {
+        guard showEndActions, !nextChapterFailed, !catalogRefreshing else { return }
+        catalogRefreshFailed = false
+        catalogRefreshing = true
+        askedForCatalogRefresh = true
+        layoutRevision += 1
+        onNeedRefreshCatalog?()
     }
 
     var pageLabel: String {
@@ -459,6 +490,9 @@ final class ReaderEngine {
         askedForNext = false
         nextChapterFailed = false
         failedAt = nil
+        catalogRefreshing = false
+        catalogRefreshFailed = false
+        askedForCatalogRefresh = false
         if viewingEnd {
             animateNextTurn = true
             position = ReaderPosition(chapterIndex: oldCount, pageIndex: 0)
@@ -524,6 +558,9 @@ final class ReaderEngine {
         askedForNext = false
         nextChapterFailed = false
         failedAt = nil
+        catalogRefreshing = false
+        catalogRefreshFailed = false
+        askedForCatalogRefresh = false
         if waiting {
             animateNextTurn = true
             let forward = originRemote.map { target > $0 } ?? true
@@ -777,9 +814,21 @@ final class ReaderEngine {
 
     private func requestNextIfNeeded() {
         if remoteChapterCount > 0 {
-            guard let remote = position.boundaryRemote, !askedForNext, !nextChapterFailed else { return }
-            askedForNext = true
-            onNeedRemoteChapter?(remote)
+            if let remote = position.boundaryRemote {
+                guard !askedForNext, !nextChapterFailed else { return }
+                askedForNext = true
+                onNeedRemoteChapter?(remote)
+                return
+            }
+            // 没有待下载的交界章，且已经停在末尾页：向书源重新拉目录，看作者是否更新了新章节。
+            guard position.chapterIndex >= chapters.count,
+                  !askedForCatalogRefresh,
+                  !nextChapterFailed,
+                  !catalogRefreshing else { return }
+            askedForCatalogRefresh = true
+            catalogRefreshing = true
+            layoutRevision += 1
+            onNeedRefreshCatalog?()
             return
         }
         guard hasUnloadedChapters, !askedForNext, !nextChapterFailed else { return }
