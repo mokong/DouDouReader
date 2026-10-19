@@ -12,17 +12,26 @@ enum HomeTab: Hashable {
     case discover
 }
 
+/// 底部栏占位。书架滚动区和发现页留出同样高度，栏本身叠在上面，推入阅读页时不再把导航栈撑高或压矮。
+private enum HomeChrome {
+    static let tabBarHeight: CGFloat = 64
+}
+
 /// 主页两栏：书架接着读，发现页浏览当前书源。
+
 struct HomeShell: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var tab = HomeTab.shelf
     @State private var shelfPath: [ShelfDestination] = []
+    /// 阅读页自己的明暗。推入过程中先保持书架的浅色，转场结束后再交给阅读页。
+    @State private var readerOwnsScheme = false
 
-    private var showsTabs: Bool {
-        tab == .discover || shelfPath.isEmpty
+    private var readerIsOpen: Bool {
+        shelfPath.contains { if case .book = $0 { return true }; return false }
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        ZStack(alignment: .bottom) {
             ZStack {
                 BookshelfView(path: $shelfPath)
                     .opacity(tab == .shelf ? 1 : 0)
@@ -35,25 +44,56 @@ struct HomeShell: View {
                             tab = .shelf
                         }
                     }
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        homeTabs
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if showsTabs {
+            if tab == .shelf {
                 homeTabs
+                    .opacity(shelfPath.isEmpty ? 1 : 0)
+                    .animation(nil, value: shelfPath.isEmpty)
+                    .allowsHitTesting(shelfPath.isEmpty)
+                    .accessibilityHidden(!shelfPath.isEmpty)
             }
         }
         .background((tab == .discover ? Color.black : ShelfInk.paper).ignoresSafeArea())
         .preferredColorScheme(windowScheme)
         .onAppear(perform: openLaunchTab)
+        .onChange(of: shelfPath) { _, _ in
+            syncReaderScheme()
+        }
     }
 
     /// 阅读页自己决定明暗。发现页保持深色，书架保持暖纸色。
+    /// 推入阅读页的那一下先不改窗口配色，否则转场中途整窗换色，动画会顿一下。
     private var windowScheme: ColorScheme? {
         if tab == .discover { return .dark }
-        if shelfPath.contains(where: { if case .book = $0 { return true }; return false }) {
-            return nil
-        }
+        if readerOwnsScheme { return nil }
         return .light
+    }
+
+    private func syncReaderScheme() {
+        guard readerIsOpen else {
+            readerOwnsScheme = false
+            return
+        }
+        #if os(iOS) || os(visionOS)
+        let delay: Duration = reduceMotion ? .zero : .milliseconds(380)
+        #else
+        let delay: Duration = .zero
+        #endif
+        guard delay > .zero else {
+            readerOwnsScheme = true
+            return
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: delay)
+            if readerIsOpen {
+                readerOwnsScheme = true
+            }
+        }
     }
 
     private var homeTabs: some View {
@@ -158,12 +198,14 @@ struct BookshelfView: View {
                         }
                     }
                     .padding(16)
+                    .padding(.bottom, HomeChrome.tabBarHeight)
                 }
                 .refreshable {
-                    await checkAllUpdates()
+                    // 提示要等这次刷新返回之后再弹。刷新过程中弹 alert 会取消任务，转圈就停不住。
+                    let summary = await checkAllUpdates()
+                    presentNoticeAfterRefresh(summary)
                 }
             }
-            .geometryGroup()
             .background(ShelfInk.paper.ignoresSafeArea())
             .navigationDestination(for: ShelfDestination.self) { destination in
                 switch destination {
@@ -243,13 +285,24 @@ struct BookshelfView: View {
             openSample()
         }
         .onChange(of: path) { _, newValue in
-            // 打开一本书时清掉它的更新角标：新目录已经随检查结果落库。
-            if case .book(let id) = newValue.last, let book = books.first(where: { $0.id == id }) {
-                if book.updateAvailable {
-                    book.updateAvailable = false
-                    try? modelContext.save()
-                }
+            // 打开一本书时清掉它的更新角标。等推入动画结束再写库，避免转场中途刷新书架。
+            guard case .book(let id) = newValue.last else { return }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(380))
+                guard case .book(let current) = path.last, current == id else { return }
+                guard let book = books.first(where: { $0.id == id }), book.updateAvailable else { return }
+                book.updateAvailable = false
+                try? modelContext.save()
             }
+        }
+    }
+
+    /// 下拉刷新的任务返回后，系统才会收起转圈。这里再等一小会儿，避开收起动画。
+    private func presentNoticeAfterRefresh(_ message: String?) {
+        guard let message else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(500))
+            notice = message
         }
     }
 
@@ -404,7 +457,11 @@ struct BookshelfView: View {
                 Label("缓存管理", systemImage: "internaldrive")
             }
             Button {
-                Task { await checkAllUpdates() }
+                Task {
+                    if let summary = await checkAllUpdates() {
+                        notice = summary
+                    }
+                }
             } label: {
                 Label(checkingUpdates ? "正在检查更新…" : "检查全部更新", systemImage: "arrow.triangle.2.circlepath")
             }
@@ -487,7 +544,9 @@ struct BookshelfView: View {
         }
     }
 
-    private func checkUpdate(book: BookRecord, silent: Bool = false) async {
+    /// 失败时返回要给用户看的那一句。批量检查自己决定什么时候弹，避免下拉刷新中途弹窗。
+    @discardableResult
+    private func checkUpdate(book: BookRecord, silent: Bool = false) async -> String? {
         updatingBookIDs.insert(book.id)
         defer { updatingBookIDs.remove(book.id) }
 
@@ -497,8 +556,9 @@ struct BookshelfView: View {
             book.lastCheckMessage = "书源失效，请换源"
             book.updateAvailable = false
             try? modelContext.save()
-            if !silent { notice = "《\(book.title)》书源失效，请换源" }
-            return
+            let message = "《\(book.title)》书源失效，请换源"
+            if !silent { notice = message }
+            return message
         }
 
         do {
@@ -511,35 +571,41 @@ struct BookshelfView: View {
             book.latestRemoteChapterTitle = outcome.latestTitle
             book.lastCheckMessage = outcome.hasUpdate ? "发现 \(outcome.newChapterCount) 章更新" : "已是最新"
             try? modelContext.save()
+            return nil
         } catch {
             book.lastCheckMessage = "书源失效，请换源"
             book.updateAvailable = false
             try? modelContext.save()
-            if !silent { notice = "《\(book.title)》检查失败：\(friendlyCheckError(error))" }
+            let message = "《\(book.title)》检查失败：\(friendlyCheckError(error))"
+            if !silent { notice = message }
+            return message
         }
     }
 
-    private func checkAllUpdates(silent: Bool = false) async {
+    /// 批量检查时不逐本弹窗。一本失败就弹窗的话，下拉刷新还没跑完，转圈会被 alert 取消。
+    @discardableResult
+    private func checkAllUpdates(silent: Bool = false) async -> String? {
         checkingUpdates = true
         defer { checkingUpdates = false }
         let online = visibleBooks.filter { !$0.remoteBookID.isEmpty }
         guard !online.isEmpty else {
-            if !silent { notice = "书架上没有需要检查的在线书" }
-            return
+            return silent ? nil : "书架上没有需要检查的在线书"
         }
         var updated = 0
-        var failed = 0
+        var failures: [String] = []
         for book in online {
-            await checkUpdate(book: book, silent: silent)
-            if book.updateAvailable {
+            if let failure = await checkUpdate(book: book, silent: true) {
+                failures.append(failure)
+            } else if book.updateAvailable {
                 updated += 1
-            } else if book.lastCheckMessage == "书源失效，请换源" {
-                failed += 1
             }
         }
-        if !silent {
-            notice = "检查完成：\(updated) 本有更新\(failed > 0 ? "，\(failed) 本书源失效" : "")"
+        guard !silent else { return nil }
+        if updated == 0, failures.count == 1 {
+            return failures[0]
         }
+        let failedNote = failures.isEmpty ? "" : "，\(failures.count) 本书源失效"
+        return "检查完成：\(updated) 本有更新\(failedNote)"
     }
 
     private func friendlyCheckError(_ error: Error) -> String {

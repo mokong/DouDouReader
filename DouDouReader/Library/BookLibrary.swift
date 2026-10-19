@@ -83,7 +83,7 @@ enum BookStorage {
         return fileName
     }
 
-    static func read(fileName: String) throws -> String {
+    nonisolated static func read(fileName: String) throws -> String {
         let data = try Data(contentsOf: fileURL(fileName))
         guard let text = TextDecoding.decode(data) else { throw ImportError.unreadableEncoding }
         return TextDecoding.normalize(text)
@@ -353,7 +353,7 @@ nonisolated enum StoredChapters {
     }
 }
 
-enum RemoteChapterList {
+nonisolated enum RemoteChapterList {
     static func encode(_ chapters: [RemoteChapterRef]) -> String {
         guard let data = try? JSONEncoder().encode(chapters) else { return "" }
         return String(decoding: data, as: UTF8.self)
@@ -392,7 +392,7 @@ enum RemoteChapterList {
 }
 
 enum BookLibrary {
-    static func hash(_ text: String) -> String {
+    nonisolated static func hash(_ text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 

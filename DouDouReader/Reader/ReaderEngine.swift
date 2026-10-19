@@ -73,12 +73,7 @@ final class ReaderEngine {
         anchorOffset = min(max(0, startOffset), total)
         self.settings = settings
         appliedLayout = settings.layoutSnapshot(interfaceDark: false)
-        speech.onAdvance = { [weak self] step in
-            self?.handleSpeechAdvance(step)
-        }
-        speech.onRange = { [weak self] range in
-            self?.handleSpeechRange(range)
-        }
+        bindSpeech()
     }
 
     /// 在线书按已下载的章节建正文。remoteIndex 可以不连续。
@@ -104,6 +99,30 @@ final class ReaderEngine {
         anchorOffset = min(max(0, startOffset), total)
         self.settings = settings
         appliedLayout = settings.layoutSnapshot(interfaceDark: false)
+        bindSpeech()
+    }
+
+    /// 正文和章节已经在后台组好。打开书时用这个，避免推入动画期间在主线程拼接全文。
+    init(
+        preparedText text: String,
+        chapters: [ChapterSlice],
+        remoteCount: Int,
+        startOffset: Int,
+        settings: ReaderSettingsStore
+    ) {
+        source = text
+        self.chapters = chapters.isEmpty
+            ? ChapterSplitter.split(text, fallbackTitle: text)
+            : chapters
+        remoteChapterCount = remoteCount
+        let total = (text as NSString).length
+        anchorOffset = min(max(0, startOffset), total)
+        self.settings = settings
+        appliedLayout = settings.layoutSnapshot(interfaceDark: false)
+        bindSpeech()
+    }
+
+    private func bindSpeech() {
         speech.onAdvance = { [weak self] step in
             self?.handleSpeechAdvance(step)
         }

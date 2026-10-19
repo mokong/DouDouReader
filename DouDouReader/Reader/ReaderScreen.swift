@@ -5,6 +5,104 @@ import AVFAudio
 import UIKit
 #endif
 
+private nonisolated struct BookOpenSnapshot: Sendable {
+    var fileName: String
+    var title: String
+    var utf16Offset: Int
+    var chapterIndex: Int
+    var remoteChapterList: String
+}
+
+private nonisolated struct BookProgressPatch: Sendable {
+    var utf16Offset: Int
+    var totalUTF16: Int
+    var contentHash: String
+}
+
+private nonisolated struct PreparedBook: Sendable {
+    var text: String
+    var chapters: [ChapterSlice]
+    var remoteCount: Int
+    var startOffset: Int
+    var isRemote: Bool
+    var remoteTitles: [String]
+    var correctedChapterList: String?
+    var progress: BookProgressPatch?
+    var migratedChapterCount: Int?
+}
+
+/// 读文件、拆章、对齐缓存都在主线程之外做完，阅读页只负责挂上结果。
+private nonisolated enum BookOpenPreparation {
+    static func make(_ snapshot: BookOpenSnapshot) -> PreparedBook? {
+        guard let text = try? BookStorage.read(fileName: snapshot.fileName) else { return nil }
+        let persisted = RemoteChapterList.decode(snapshot.remoteChapterList)
+        let remoteChapters = RemoteChapterList.normalizedAscending(persisted)
+        guard !remoteChapters.isEmpty else {
+            return PreparedBook(
+                text: text,
+                chapters: ChapterSplitter.split(text, fallbackTitle: snapshot.title),
+                remoteCount: 0,
+                startOffset: snapshot.utf16Offset,
+                isRemote: false,
+                remoteTitles: [],
+                correctedChapterList: nil,
+                progress: nil,
+                migratedChapterCount: nil
+            )
+        }
+        let corrected: String? = remoteChapters.map(\.url) == persisted.map(\.url)
+            ? nil
+            : RemoteChapterList.encode(remoteChapters)
+        let hadPersistedIndex = StoredChapters.persistedIndexExists(fileName: snapshot.fileName)
+        var items = StoredChapters.load(fileName: snapshot.fileName)
+        var migratedCount: Int?
+        if items.isEmpty {
+            var migrated = StoredChapters.migrated(from: text, fallbackTitle: snapshot.title)
+            migrated = migrated.filter { $0.index < remoteChapters.count }
+            if !migrated.isEmpty {
+                try? StoredChapters.save(fileName: snapshot.fileName, chapters: migrated)
+                migratedCount = migrated.count
+            }
+            items = migrated
+        }
+        // 书源目录顺序归一后，按章节标题把已缓存章节重对到新目录下标。
+        items = StoredChapters.remap(items, onto: remoteChapters)
+        var start = snapshot.utf16Offset
+        var progress: BookProgressPatch?
+        if !hadPersistedIndex, !items.isEmpty {
+            let index = items.contains(where: { $0.index == snapshot.chapterIndex }) ? snapshot.chapterIndex : items[0].index
+            start = StoredChapters.offset(of: index, in: items)
+            let assembled = StoredChapters.assemble(items)
+            progress = BookProgressPatch(
+                utf16Offset: start,
+                totalUTF16: (assembled as NSString).length,
+                contentHash: BookLibrary.hash(assembled)
+            )
+        }
+        let built = StoredChapters.layout(items)
+        let body: String
+        let chapters: [ChapterSlice]
+        if built.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            body = snapshot.title
+            chapters = ChapterSplitter.split(snapshot.title, fallbackTitle: snapshot.title)
+        } else {
+            body = built.text
+            chapters = built.slices
+        }
+        return PreparedBook(
+            text: body,
+            chapters: chapters,
+            remoteCount: remoteChapters.count,
+            startOffset: start,
+            isRemote: true,
+            remoteTitles: remoteChapters.map(\.title),
+            correctedChapterList: corrected,
+            progress: progress,
+            migratedChapterCount: migratedCount
+        )
+    }
+}
+
 struct ReaderScreen: View {
     var book: BookRecord
     @Environment(ReaderSettingsStore.self) private var settings
@@ -44,18 +142,31 @@ struct ReaderScreen: View {
     @State private var showSettings = false
     @State private var padTop = ScreenSafeArea.windowInsets.top
     @State private var padBottom = ScreenSafeArea.windowInsets.bottom
+    /// 推入动画期间只铺底色。正文和翻页控件等转场走完再挂上，避免中途卡一下。
+    @State private var showOpeningSpinner = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Group {
+        let theme = settings.theme(interfaceDark: deviceColorScheme == .dark)
+        ZStack {
+            theme.background.color
             if let engine {
                 reader(engine)
             } else if let loadError {
                 missing(loadError)
-            } else {
+            } else if showOpeningSpinner {
                 ProgressView("正在打开")
+                    .tint(theme.text.color)
+                    .foregroundStyle(theme.text.color)
             }
         }
-        .task { openBook() }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.background.color.ignoresSafeArea())
+        .ignoresSafeArea()
+        #if os(iOS) || os(visionOS)
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
+        .task { await openBookForAppearance() }
         .onDisappear {
             engine?.stopActivities()
             cacheGeneration += 1
@@ -638,72 +749,116 @@ struct ReaderScreen: View {
         }
     }
 
-    private func openBook() {
+    /// 导航推入大约 0.35 秒。这段时间只留底色，读文件放在后台，转场结束后再挂阅读器。
+    private var pushHold: Duration {
+        #if os(iOS) || os(visionOS)
+        reduceMotion ? .zero : .milliseconds(380)
+        #else
+        .zero
+        #endif
+    }
+
+    private func openBookForAppearance() async {
         guard engine == nil else { return }
-        do {
-            let text = try BookStorage.read(fileName: book.fileName)
-            let created = ReaderEngine(
-                text: text,
-                fallbackTitle: book.title,
-                startOffset: book.utf16Offset,
-                settings: settings
-            )
-            created.onProgress = { chapter, offset, title in
-                book.chapterIndex = chapter
-                book.utf16Offset = offset
-                book.currentChapterTitle = title
-                book.lastReadAt = Date()
-                try? modelContext.save()
-            }
-            let persisted = RemoteChapterList.decode(book.remoteChapterList)
-            // 旧书本地目录可能是倒序存的，打开时统一翻正序，并回写纠正。
-            let remoteChapters = RemoteChapterList.normalizedAscending(persisted)
-            if remoteChapters.count == persisted.count,
-               remoteChapters.map(\.url) != persisted.map(\.url) {
-                book.remoteChapterList = RemoteChapterList.encode(remoteChapters)
-            }
-            remoteChapterTitles = remoteChapters.map(\.title)
-            if !remoteChapters.isEmpty {
-                let hadPersistedIndex = StoredChapters.persistedIndexExists(fileName: book.fileName)
-                // 书源目录顺序归一后，按章节标题把已缓存章节重对到新目录下标，避免旧倒序数据下标错位。
-                var items = storedChapters(from: text, remoteCount: remoteChapters.count)
-                items = StoredChapters.remap(items, onto: remoteChapters)
-                var start = book.utf16Offset
-                if !hadPersistedIndex, !items.isEmpty {
-                    // 首次从旧格式/整本 txt 装配：把进度锚到章节级别，并补齐字数与哈希。
-                    let index = items.contains(where: { $0.index == book.chapterIndex }) ? book.chapterIndex : items[0].index
-                    start = StoredChapters.offset(of: index, in: items)
-                    book.utf16Offset = start
-                    let assembled = StoredChapters.assemble(items)
-                    book.totalUTF16 = (assembled as NSString).length
-                    book.contentHash = BookLibrary.hash(assembled)
-                    try? modelContext.save()
-                }
-                let rebuilt = ReaderEngine(
-                    stored: items,
-                    remoteCount: remoteChapters.count,
-                    fallbackTitle: book.title,
-                    startOffset: start,
-                    settings: settings
-                )
-                rebuilt.onProgress = created.onProgress
-                rebuilt.onNeedRemoteChapter = { [weak rebuilt] index in
-                    guard let rebuilt else { return }
-                    Task { @MainActor in
-                        await self.loadRemoteChapter(index, into: rebuilt, jumpAfter: false)
-                    }
-                }
-                rebuilt.onNeedRefreshCatalog = { [weak rebuilt] in
-                    guard let rebuilt else { return }
-                    Task { @MainActor in
-                        await self.refreshCatalogAndContinue(into: rebuilt)
-                    }
-                }
-                rebuilt.applySettings(settings, interfaceDark: deviceColorScheme == .dark)
-                engine = rebuilt
-                updateIdleTimer()
+        let snapshot = BookOpenSnapshot(
+            fileName: book.fileName,
+            title: book.title,
+            utf16Offset: book.utf16Offset,
+            chapterIndex: book.chapterIndex,
+            remoteChapterList: book.remoteChapterList
+        )
+        let loader = Task.detached(priority: .userInitiated) {
+            BookOpenPreparation.make(snapshot)
+        }
+        let hold = pushHold
+        if hold > .zero {
+            do {
+                try await Task.sleep(for: hold)
+            } catch {
+                loader.cancel()
                 return
             }
+        }
+        guard !Task.isCancelled, engine == nil else {
+            loader.cancel()
+            return
+        }
+        let spinner = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(16))
+            guard !Task.isCancelled, self.engine == nil, self.loadError == nil else { return }
+            self.showOpeningSpinner = true
+        }
+        let prepared = await loader.value
+        spinner.cancel()
+        guard !Task.isCancelled, engine == nil else { return }
+        showOpeningSpinner = false
+        guard let prepared else {
+            loadError = "这本书的文件打不开"
+            return
+        }
+        install(prepared)
+    }
+
+    private func openBook() {
+        guard engine == nil else { return }
+        let snapshot = BookOpenSnapshot(
+            fileName: book.fileName,
+            title: book.title,
+            utf16Offset: book.utf16Offset,
+            chapterIndex: book.chapterIndex,
+            remoteChapterList: book.remoteChapterList
+        )
+        guard let prepared = BookOpenPreparation.make(snapshot) else {
+            loadError = "这本书的文件打不开"
+            return
+        }
+        install(prepared)
+    }
+
+    private func install(_ prepared: PreparedBook) {
+        if let corrected = prepared.correctedChapterList {
+            book.remoteChapterList = corrected
+        }
+        if let count = prepared.migratedChapterCount {
+            book.loadedChapterCount = count
+        }
+        if let progress = prepared.progress {
+            book.utf16Offset = progress.utf16Offset
+            book.totalUTF16 = progress.totalUTF16
+            book.contentHash = progress.contentHash
+        }
+        if prepared.correctedChapterList != nil || prepared.migratedChapterCount != nil || prepared.progress != nil {
+            try? modelContext.save()
+        }
+        remoteChapterTitles = prepared.remoteTitles
+        let created = ReaderEngine(
+            preparedText: prepared.text,
+            chapters: prepared.chapters,
+            remoteCount: prepared.remoteCount,
+            startOffset: prepared.startOffset,
+            settings: settings
+        )
+        created.onProgress = { chapter, offset, title in
+            book.chapterIndex = chapter
+            book.utf16Offset = offset
+            book.currentChapterTitle = title
+            book.lastReadAt = Date()
+            try? modelContext.save()
+        }
+        if prepared.isRemote {
+            created.onNeedRemoteChapter = { [weak created] index in
+                guard let created else { return }
+                Task { @MainActor in
+                    await self.loadRemoteChapter(index, into: created, jumpAfter: false)
+                }
+            }
+            created.onNeedRefreshCatalog = { [weak created] in
+                guard let created else { return }
+                Task { @MainActor in
+                    await self.refreshCatalogAndContinue(into: created)
+                }
+            }
+        } else {
             created.hasUnloadedChapters = false
             created.onNeedNextChapter = { [weak created] in
                 guard let created else { return }
@@ -711,26 +866,10 @@ struct ReaderScreen: View {
                     await self.loadNextChapter(into: created)
                 }
             }
-            created.applySettings(settings, interfaceDark: deviceColorScheme == .dark)
-            engine = created
-            updateIdleTimer()
-        } catch {
-            loadError = "这本书的文件打不开"
         }
-    }
-
-    private func storedChapters(from text: String, remoteCount: Int) -> [StoredChapter] {
-        let saved = StoredChapters.load(fileName: book.fileName)
-        if !saved.isEmpty { return saved }
-        var migrated = StoredChapters.migrated(from: text, fallbackTitle: book.title)
-        if remoteCount > 0 {
-            migrated = migrated.filter { $0.index < remoteCount }
-        }
-        if !migrated.isEmpty {
-            try? StoredChapters.save(fileName: book.fileName, chapters: migrated)
-            book.loadedChapterCount = migrated.count
-        }
-        return migrated
+        created.applySettings(settings, interfaceDark: deviceColorScheme == .dark)
+        engine = created
+        updateIdleTimer()
     }
 
     private func selectCatalogChapter(_ index: Int, engine: ReaderEngine) {
@@ -844,6 +983,7 @@ struct ReaderScreen: View {
             return true
         }
         if !allowConcurrent {
+            var waited = 0
             while chapterFetchInFlight {
                 if Task.isCancelled { return false }
                 if readerGeneration != ticket {
@@ -851,7 +991,13 @@ struct ReaderScreen: View {
                     return false
                 }
                 if let generation, generation != catalogGeneration { return false }
-                try? await Task.sleep(nanoseconds: 40_000_000)
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                waited += 50_000_000
+                // 闸门超过 3 秒未释放（可能上一次异常退出没清），强制继续，避免重试死等。
+                if waited > 3_000_000_000 {
+                    chapterFetchInFlight = false
+                    break
+                }
             }
         }
         if engine.chapters.contains(where: { $0.remoteIndex == index }) {
@@ -940,8 +1086,8 @@ struct ReaderScreen: View {
     private func chapterFailureActions(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
         HStack(spacing: 16) {
             Button("重试") {
-                if engine.isChapterLoadFailed {
-                    engine.retryCurrentChapter()
+                if engine.isChapterLoadFailed, let remote = engine.position.boundaryRemote {
+                    retryFailedChapter(remote, into: engine)
                 } else {
                     engine.retryCatalogRefresh()
                 }
@@ -957,6 +1103,13 @@ struct ReaderScreen: View {
         }
         .buttonStyle(.bordered)
         .tint(theme.text.color)
+    }
+
+    /// 章节交界加载失败后的重试：先清掉串行闸门和预取标记，再重置引擎状态并重新下载。
+    private func retryFailedChapter(_ remote: Int, into engine: ReaderEngine) {
+        chapterFetchInFlight = false
+        prefetchedUpTo = -1
+        engine.retryCurrentChapter()
     }
 
     /// 自动换源：跨其它可用书源搜索当前书名，取首个命中直接切换。
