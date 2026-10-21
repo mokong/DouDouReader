@@ -105,6 +105,7 @@ private nonisolated enum BookOpenPreparation {
 
 struct ReaderScreen: View {
     var book: BookRecord
+    @Query(sort: \SourceRecord.addedAt) private var sourceRecords: [SourceRecord]
     @Environment(ReaderSettingsStore.self) private var settings
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
@@ -134,6 +135,7 @@ struct ReaderScreen: View {
     @State private var cacheTask: Task<Void, Never>?
     @State private var chapterScrub = 0.0
     @State private var scrubbingChapter = false
+    @State private var scrubOriginalIndex: Int?
     @State private var chapterMoveError: String?
     @State private var chapterMoveGeneration = 0
     @State private var showSearch = false
@@ -148,6 +150,12 @@ struct ReaderScreen: View {
     @State private var startBrightness: Double = 1.0
     @State private var brightnessHUDTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var currentSourceName: String? {
+        guard !book.remoteSourceID.isEmpty else { return nil }
+        let sources = BookSourceLibrary.switchable(records: sourceRecords)
+        return sources.first(where: { $0.id == book.remoteSourceID })?.name
+    }
 
     var body: some View {
         let theme = settings.theme(interfaceDark: deviceColorScheme == .dark)
@@ -221,6 +229,7 @@ struct ReaderScreen: View {
                 if engine.showsChrome {
                     topBar(engine, theme: theme)
                         .padding(.top, safeTop)
+                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
             .overlay(alignment: .bottom) {
@@ -228,8 +237,10 @@ struct ReaderScreen: View {
                     bottomPanel(engine, theme: theme)
                         .padding(.bottom, safeBottom)
                         .background(theme.background.color)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            .animation(.easeInOut(duration: 0.22), value: engine.showsChrome)
             #if os(iOS) || os(visionOS)
             .background {
                 SafeAreaProbe { top, bottom in
@@ -256,6 +267,11 @@ struct ReaderScreen: View {
         .onChange(of: engine.position) { _, _ in
             prefetchNextChapterIfNeeded(engine: engine)
         }
+        .onChange(of: engine.showsChrome) { _, shown in
+            if !shown {
+                scrubOriginalIndex = nil
+            }
+        }
         .sheet(isPresented: $showCatalog) {
             CatalogSheet(
                 engine: engine,
@@ -276,6 +292,9 @@ struct ReaderScreen: View {
                     presentSourceSwitch(preferring: title)
                 }
             )
+            #if os(iOS) || os(visionOS)
+            .presentationDragIndicator(.visible)
+            #endif
         }
         .onChange(of: showCatalog) { _, shown in
             if shown {
@@ -292,6 +311,9 @@ struct ReaderScreen: View {
                 showSearch = false
                 engine.showsChrome = false
             }
+            #if os(iOS) || os(visionOS)
+            .presentationDragIndicator(.visible)
+            #endif
         }
         .sheet(isPresented: $showBookmarks) {
             BookmarkSheet(book: book, engine: engine) { offset in
@@ -299,9 +321,17 @@ struct ReaderScreen: View {
                 showBookmarks = false
                 engine.showsChrome = false
             }
+            #if os(iOS) || os(visionOS)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            #endif
         }
         .sheet(isPresented: $showSettings) {
             SettingsPanel(settings: settings)
+                #if os(iOS) || os(visionOS)
+                .presentationDetents([.fraction(0.55), .large])
+                .presentationDragIndicator(.visible)
+                #endif
         }
         .sheet(isPresented: $showCache) {
             CacheSheet(
@@ -314,6 +344,10 @@ struct ReaderScreen: View {
                 onStart: { startCache(engine) },
                 onStop: { stopCache() }
             )
+            #if os(iOS) || os(visionOS)
+            .presentationDetents([.fraction(0.48), .large])
+            .presentationDragIndicator(.visible)
+            #endif
         }
         .sheet(isPresented: $showSourceSwitch) {
             SourceSwitchSheet(
@@ -325,6 +359,10 @@ struct ReaderScreen: View {
                     await switchSource(to: source, hit: hit)
                 }
             )
+            #if os(iOS) || os(visionOS)
+            .presentationDetents([.fraction(0.68), .large])
+            .presentationDragIndicator(.visible)
+            #endif
         }
         #if os(iOS)
         .onAppear { updateIdleTimer() }
@@ -412,19 +450,61 @@ struct ReaderScreen: View {
                     .frame(width: 36, height: 36)
             }
             .accessibilityLabel("返回")
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(book.title)
                     .font(.headline)
                     .lineLimit(1)
-                if !engine.currentTitle.isEmpty {
-                    Text(engine.currentTitle)
-                        .font(.caption2)
-                        .lineLimit(1)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    if !engine.currentTitle.isEmpty {
+                        Text(engine.currentTitle)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let sourceName = currentSourceName {
+                        Button {
+                            presentSourceSwitch(preferring: engine.currentTitle)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 8, weight: .bold))
+                                Text(sourceName)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.12), in: Capsule())
+                            .foregroundStyle(Color.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("当前书源：\(sourceName)，点击换源")
+                    }
                 }
             }
             Spacer(minLength: 8)
-            listenMenu(engine)
+            HStack(spacing: 4) {
+                Button {
+                    searchInitialQuery = ""
+                    showSearch = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("搜索")
+
+                Button {
+                    showBookmarks = true
+                } label: {
+                    Image(systemName: "bookmark")
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("书签")
+
+                listenMenu(engine)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -469,9 +549,29 @@ struct ReaderScreen: View {
         let count = scrubCount(engine)
         let index = scrubbingChapter ? Int(chapterScrub.rounded()) : scrubIndex(engine)
         return VStack(spacing: 4) {
-            Text(chapterTitle(at: index, engine: engine))
-                .font(.caption)
-                .lineLimit(1)
+            HStack(spacing: 8) {
+                Text(chapterTitle(at: index, engine: engine))
+                    .font(.caption)
+                    .lineLimit(1)
+                if let original = scrubOriginalIndex, original != index {
+                    Button {
+                        moveToChapter(original, engine: engine)
+                        scrubOriginalIndex = nil
+                    } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: "arrow.uturn.backward")
+                            Text("返回原章")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity)
+                }
+            }
             HStack(spacing: 8) {
                 Button("上一章") { stepChapter(-1, engine: engine) }
                     .disabled(index <= 0)
@@ -484,8 +584,16 @@ struct ReaderScreen: View {
                     step: 1
                 ) { editing in
                     scrubbingChapter = editing
-                    if !editing {
-                        moveToChapter(Int(chapterScrub.rounded()), engine: engine)
+                    if editing {
+                        if scrubOriginalIndex == nil {
+                            scrubOriginalIndex = scrubIndex(engine)
+                        }
+                    } else {
+                        let target = Int(chapterScrub.rounded())
+                        if target == scrubOriginalIndex {
+                            scrubOriginalIndex = nil
+                        }
+                        moveToChapter(target, engine: engine)
                     }
                 }
                 .tint(theme.text.color)
@@ -724,6 +832,7 @@ struct ReaderScreen: View {
     }
 
     private func stepChapter(_ delta: Int, engine: ReaderEngine) {
+        scrubOriginalIndex = nil
         let count = scrubCount(engine)
         guard count > 0 else { return }
         let next = min(max(scrubIndex(engine) + delta, 0), count - 1)

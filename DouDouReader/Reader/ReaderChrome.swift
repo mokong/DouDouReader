@@ -26,7 +26,7 @@ struct SettingsPanel: View {
                         }
                     }
                     Button("导入字体") { importingFont = true }
-                    labeledSlider("字号", value: $settings.fontSize, range: 14...36, step: 1, text: "\(Int(settings.fontSize.rounded()))")
+                    fontSizeRow()
                     labeledSlider("行距", value: $settings.lineSpacing, range: 0...36, step: 1, text: "\(Int(settings.lineSpacing.rounded()))")
                     labeledSlider("段距", value: $settings.paragraphSpacing, range: 0...48, step: 1, text: "\(Int(settings.paragraphSpacing.rounded()))")
                     Stepper("首行缩进 \(settings.indentChars)", value: $settings.indentChars, in: 0...4)
@@ -167,6 +167,39 @@ struct SettingsPanel: View {
         return types
     }
 
+    private func fontSizeRow() -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("字号")
+                Spacer()
+                Text("\(Int(settings.fontSize.rounded()))")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 12) {
+                Button {
+                    if settings.fontSize > 14 { settings.fontSize -= 1 }
+                } label: {
+                    Image(systemName: "textformat.size.smaller")
+                        .frame(width: 32, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .disabled(settings.fontSize <= 14)
+
+                Slider(value: $settings.fontSize, in: 14...36, step: 1)
+
+                Button {
+                    if settings.fontSize < 36 { settings.fontSize += 1 }
+                } label: {
+                    Image(systemName: "textformat.size.larger")
+                        .frame(width: 32, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .disabled(settings.fontSize >= 36)
+            }
+        }
+    }
+
     private func labeledSlider(
         _ title: String,
         value: Binding<Double>,
@@ -250,13 +283,24 @@ struct CatalogSheet: View {
     var onJump: (Int) -> Void
     var onRetry: () -> Void = {}
     var onSwitchSource: () -> Void = {}
+    @Environment(\.dismiss) private var dismiss
 
-    private var rows: [ReaderCatalog.Row] {
+    @State private var isAscending = true
+    @State private var searchText = ""
+
+    private var allRows: [ReaderCatalog.Row] {
         ReaderCatalog.rows(
             engineTitles: engine.chapters.map(\.title),
             remoteTitles: remoteTitles,
             loadedIndices: loadedIndices
         )
+    }
+
+    private var displayedRows: [ReaderCatalog.Row] {
+        let base = isAscending ? allRows : Array(allRows.reversed())
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return base }
+        return base.filter { $0.title.lowercased().contains(query) }
     }
 
     private var currentMarker: Int? {
@@ -276,21 +320,71 @@ struct CatalogSheet: View {
         NavigationStack {
             ScrollViewReader { proxy in
                 List {
-                    if !remoteTitles.isEmpty {
-                        Section {
+                    Section {
+                        if displayedRows.isEmpty {
+                            Text("未找到匹配章节")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.vertical, 24)
+                        } else {
                             catalogRows
-                        } header: {
-                            Text("共 \(rows.count) 章，已下载 \(loadedIndices.count) 章")
                         }
-                    } else {
-                        catalogRows
+                    } header: {
+                        catalogHeader
                     }
                 }
+                .searchable(text: $searchText, prompt: "搜索章节名")
                 .onAppear {
                     let current = currentMarker ?? 0
                     DispatchQueue.main.async {
                         proxy.scrollTo(current, anchor: .center)
                     }
+                }
+                .toolbar {
+                    #if os(iOS) || os(visionOS)
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("关闭") { dismiss() }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        HStack(spacing: 14) {
+                            if let currentMarker {
+                                Button {
+                                    withAnimation {
+                                        proxy.scrollTo(currentMarker, anchor: .center)
+                                    }
+                                } label: {
+                                    Image(systemName: "scope")
+                                }
+                                .accessibilityLabel("定位当前章节")
+                            }
+                            Button {
+                                withAnimation {
+                                    isAscending.toggle()
+                                }
+                            } label: {
+                                Image(systemName: isAscending ? "arrow.down" : "arrow.up")
+                            }
+                            .accessibilityLabel(isAscending ? "倒序排列" : "正序排列")
+                        }
+                    }
+                    #else
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("关闭") { dismiss() }
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        HStack(spacing: 8) {
+                            if let currentMarker {
+                                Button("定位当前") {
+                                    proxy.scrollTo(currentMarker, anchor: .center)
+                                }
+                            }
+                            Button(isAscending ? "倒序" : "正序") {
+                                isAscending.toggle()
+                            }
+                        }
+                    }
+                    #endif
                 }
             }
             .navigationTitle("目录")
@@ -303,19 +397,37 @@ struct CatalogSheet: View {
         }
     }
 
+    private var catalogHeader: some View {
+        HStack {
+            if !searchText.isEmpty {
+                Text("匹配 \(displayedRows.count) 章（共 \(allRows.count) 章）")
+            } else if !remoteTitles.isEmpty {
+                Text("共 \(allRows.count) 章 · 已缓存 \(loadedIndices.count) 章 · \(isAscending ? "正序" : "倒序")")
+            } else {
+                Text("共 \(allRows.count) 章 · \(isAscending ? "正序" : "倒序")")
+            }
+            Spacer()
+        }
+        .font(.caption)
+    }
+
     private var catalogRows: some View {
-        ForEach(rows) { row in
+        ForEach(displayedRows) { row in
             Button {
                 onJump(row.index)
             } label: {
                 HStack {
                     Text(row.title)
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(currentMarker == row.index ? Color.accentColor : .primary)
+                        .fontWeight(currentMarker == row.index ? .semibold : .regular)
                     Spacer()
                     if currentMarker == row.index {
                         Text("当前")
-                            .font(.caption)
+                            .font(.caption.weight(.medium))
                             .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.12), in: Capsule())
                     } else if !row.isLoaded {
                         Text("未下载")
                             .font(.caption)

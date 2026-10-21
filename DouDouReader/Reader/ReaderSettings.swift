@@ -39,6 +39,7 @@ enum TextAlignmentChoice: Int, Codable, CaseIterable, Identifiable {
     case left = 0
     case center = 1
     case right = 2
+    case justified = 3
 
     var id: Int { rawValue }
     var title: String {
@@ -46,6 +47,7 @@ enum TextAlignmentChoice: Int, Codable, CaseIterable, Identifiable {
         case .left: "左"
         case .center: "中"
         case .right: "右"
+        case .justified: "两端"
         }
     }
 }

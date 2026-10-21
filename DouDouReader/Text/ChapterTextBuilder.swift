@@ -46,6 +46,8 @@ enum ChapterTextBuilder {
         bodyStyle.lineSpacing = lineSpacing
         bodyStyle.paragraphSpacing = paragraphSpacing
         bodyStyle.lineBreakMode = .byCharWrapping
+        bodyStyle.allowsDefaultTighteningForTruncation = true
+        bodyStyle.hyphenationFactor = 0.8
         bodyStyle.firstLineHeadIndent = fontSize * CGFloat(indentChars)
         let font = PlatformFont.make(name: fontName, size: fontSize)
         for (index, paragraph) in paragraphs.enumerated() {
@@ -96,6 +98,7 @@ enum ChapterTextBuilder {
         case .left: .left
         case .center: .center
         case .right: .right
+        case .justified: .justified
         }
     }
 }

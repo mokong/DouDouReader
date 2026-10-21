@@ -54,6 +54,7 @@ enum LogicChecks {
         checkBookCachePlan(&errors)
         checkSpeechEntry(&errors)
         checkSpeechRateMenu(&errors)
+        checkTypography(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -528,6 +529,31 @@ enum LogicChecks {
         let filtered = ChapterTextBuilder.plainParagraphs("甲\n这是广告句\n乙", blockWords: "广告")
         if filtered != "甲\n乙" {
             errors.append("屏蔽词没有去掉整段：\(filtered)")
+        }
+    }
+
+    private static func checkTypography(_ errors: inout [String]) {
+        let (attr, prefix, bodyLen) = ChapterTextBuilder.make(
+            title: "第一章",
+            body: "春眠不觉晓，处处闻啼鸟。夜来风雨声，花落知多少。",
+            fontName: "",
+            fontSize: 16,
+            lineSpacing: 8,
+            paragraphSpacing: 12,
+            indentChars: 2,
+            kern: 0,
+            alignment: .justified,
+            color: .black,
+            blockWords: ""
+        )
+        if attr.length == 0 || bodyLen == 0 {
+            errors.append("两端对齐排版生成富文本长度为空")
+        }
+        var effectiveRange = NSRange(location: 0, length: 0)
+        if bodyLen > 0, let style = attr.attribute(.paragraphStyle, at: prefix, effectiveRange: &effectiveRange) as? NSParagraphStyle {
+            if style.alignment != NSTextAlignment.justified {
+                errors.append("两端对齐段落样式未生效：\(style.alignment.rawValue)")
+            }
         }
     }
 
