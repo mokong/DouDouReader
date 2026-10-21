@@ -573,6 +573,22 @@ struct ReaderScreen: View {
         .allowsHitTesting(false)
     }
 
+    @ViewBuilder
+    private func barItemContent(title: String, systemImage: String) -> some View {
+        VStack(spacing: 3) {
+            Image(systemName: systemImage)
+                .font(.system(size: 18, weight: .regular))
+                .frame(width: 24, height: 20)
+            Text(title)
+                .font(.caption2)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 46)
+        .contentShape(Rectangle())
+    }
+
     private func moreMenu(_ engine: ReaderEngine) -> some View {
         Menu {
             Button("搜索") {
@@ -597,14 +613,7 @@ struct ReaderScreen: View {
                 }
             }
         } label: {
-            VStack(spacing: 3) {
-                Image(systemName: "ellipsis")
-                Text("更多")
-                    .font(.caption2)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 46)
+            barItemContent(title: "更多", systemImage: "ellipsis")
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
@@ -811,17 +820,10 @@ struct ReaderScreen: View {
 
     private func barButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 3) {
-                Image(systemName: systemImage)
-                Text(title)
-                    .font(.caption2)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 46)
+            barItemContent(title: title, systemImage: systemImage)
         }
         .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
         .accessibilityLabel(title)
     }
 
