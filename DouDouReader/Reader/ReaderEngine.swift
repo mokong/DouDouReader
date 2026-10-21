@@ -186,7 +186,7 @@ final class ReaderEngine {
         if catalogRefreshing { return "正在检查更新…" }
         if catalogRefreshFailed { return "检查更新失败" }
         if hasUnloadedChapters { return "正在加载下一章" }
-        return "已经读到最新章节"
+        return remoteChapterCount > 0 ? "已经读到最新章节" : "全书完"
     }
 
     var endDetail: String {
@@ -194,7 +194,7 @@ final class ReaderEngine {
         if catalogRefreshing { return "正在从书源拉取最新目录" }
         if catalogRefreshFailed { return "网络或书源异常，点下方按钮重试或换源" }
         if hasUnloadedChapters { return "请稍等" }
-        return "点「重试」再检查一次更新，或换源"
+        return remoteChapterCount > 0 ? "点「重试」再检查一次更新，或换源" : "返回目录或书架"
     }
 
     /// 是否在末尾页展示「重试 / 换源」操作：下载失败、目录刷新失败、或已读到最新。
@@ -253,7 +253,25 @@ final class ReaderEngine {
         )
         cache[key] = laid
         trimCache(around: chapterIndex)
+        schedulePrelayoutNextChapter(current: chapterIndex)
         return laid
+    }
+
+    /// 在主线程空闲时微任务预排下一章，使得翻到章末跨章滑动时直接命中缓存，零掉帧
+    private func schedulePrelayoutNextChapter(current chapterIndex: Int) {
+        let next = chapterIndex + 1
+        guard chapters.indices.contains(next) else { return }
+        let nextKey = CacheKey(
+            chapter: next,
+            width: Int(pageSize.width.rounded()),
+            height: Int(pageSize.height.rounded()),
+            snapshot: appliedLayout
+        )
+        guard cache[nextKey] == nil else { return }
+        Task { @MainActor [weak self] in
+            guard let self, self.chapters.indices.contains(next) else { return }
+            _ = self.layout(for: next)
+        }
     }
 
     func setPageSize(_ size: CGSize) {
@@ -504,8 +522,7 @@ final class ReaderEngine {
                 bodyEnd: bodyEnd
             )
         )
-        cache.removeAll()
-        layoutRevision += 1
+        // 保持前台正在阅读的既有章节排版缓存，仅当停在末尾加载页时才需要递增 layoutRevision 翻入新章
         askedForNext = false
         nextChapterFailed = false
         failedAt = nil
@@ -513,6 +530,7 @@ final class ReaderEngine {
         catalogRefreshFailed = false
         askedForCatalogRefresh = false
         if viewingEnd {
+            layoutRevision += 1
             animateNextTurn = true
             position = ReaderPosition(chapterIndex: oldCount, pageIndex: 0)
         }
@@ -572,8 +590,20 @@ final class ReaderEngine {
         for index in chapters.indices {
             chapters[index].index = index
         }
-        cache.removeAll()
-        layoutRevision += 1
+        // 智能保留既有章节排版缓存，避免章末后台静默预取清空当前页排版导致掉帧闪烁
+        if insertAt < oldCount {
+            var updatedCache: [CacheKey: ChapterLayout] = [:]
+            for (key, layout) in cache {
+                if key.chapter < insertAt {
+                    updatedCache[key] = layout
+                } else {
+                    var newKey = key
+                    newKey.chapter += 1
+                    updatedCache[newKey] = layout
+                }
+            }
+            cache = updatedCache
+        }
         askedForNext = false
         nextChapterFailed = false
         failedAt = nil
@@ -581,6 +611,7 @@ final class ReaderEngine {
         catalogRefreshFailed = false
         askedForCatalogRefresh = false
         if waiting {
+            layoutRevision += 1
             animateNextTurn = true
             let forward = originRemote.map { target > $0 } ?? true
             if forward {
@@ -590,6 +621,7 @@ final class ReaderEngine {
                 position = ReaderPosition(chapterIndex: insertAt, pageIndex: max(pages - 1, 0))
             }
         } else if oldPosition.chapterIndex >= oldCount {
+            layoutRevision += 1
             position = ReaderPosition(chapterIndex: chapters.count, pageIndex: 0)
         } else if insertAt <= oldPosition.chapterIndex {
             position = ReaderPosition(chapterIndex: oldPosition.chapterIndex + 1, pageIndex: oldPosition.pageIndex)

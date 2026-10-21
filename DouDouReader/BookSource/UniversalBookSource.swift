@@ -163,6 +163,8 @@ nonisolated struct SourceSearchRule: Codable, Sendable, Equatable {
     var summarySelector: String = ""
     /// 封面图选择器
     var coverSelector: String = ""
+    /// 搜索结果里的最新章节（阅读 3.0 的 lastChapter，香色闺阁的 lastChapter）。
+    var lastChapterSelector: String = ""
 
     nonisolated init(
         urlTemplate: String = "",
@@ -174,7 +176,8 @@ nonisolated struct SourceSearchRule: Codable, Sendable, Equatable {
         authorSelector: String = "",
         detailURLSelector: String = "",
         summarySelector: String = "",
-        coverSelector: String = ""
+        coverSelector: String = "",
+        lastChapterSelector: String = ""
     ) {
         self.urlTemplate = urlTemplate
         self.httpMethod = httpMethod
@@ -186,6 +189,43 @@ nonisolated struct SourceSearchRule: Codable, Sendable, Equatable {
         self.detailURLSelector = detailURLSelector
         self.summarySelector = summarySelector
         self.coverSelector = coverSelector
+        self.lastChapterSelector = lastChapterSelector
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case urlTemplate, httpMethod, postBody, headers
+        case listSelector, nameSelector, authorSelector, detailURLSelector
+        case summarySelector, coverSelector, lastChapterSelector
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        urlTemplate = try container.decodeIfPresent(String.self, forKey: .urlTemplate) ?? ""
+        httpMethod = try container.decodeIfPresent(String.self, forKey: .httpMethod) ?? "GET"
+        postBody = try container.decodeIfPresent(String.self, forKey: .postBody)
+        headers = try container.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
+        listSelector = try container.decodeIfPresent(String.self, forKey: .listSelector) ?? ""
+        nameSelector = try container.decodeIfPresent(String.self, forKey: .nameSelector) ?? ""
+        authorSelector = try container.decodeIfPresent(String.self, forKey: .authorSelector) ?? ""
+        detailURLSelector = try container.decodeIfPresent(String.self, forKey: .detailURLSelector) ?? ""
+        summarySelector = try container.decodeIfPresent(String.self, forKey: .summarySelector) ?? ""
+        coverSelector = try container.decodeIfPresent(String.self, forKey: .coverSelector) ?? ""
+        lastChapterSelector = try container.decodeIfPresent(String.self, forKey: .lastChapterSelector) ?? ""
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(urlTemplate, forKey: .urlTemplate)
+        try container.encode(httpMethod, forKey: .httpMethod)
+        try container.encodeIfPresent(postBody, forKey: .postBody)
+        try container.encode(headers, forKey: .headers)
+        try container.encode(listSelector, forKey: .listSelector)
+        try container.encode(nameSelector, forKey: .nameSelector)
+        try container.encode(authorSelector, forKey: .authorSelector)
+        try container.encode(detailURLSelector, forKey: .detailURLSelector)
+        try container.encode(summarySelector, forKey: .summarySelector)
+        try container.encode(coverSelector, forKey: .coverSelector)
+        try container.encode(lastChapterSelector, forKey: .lastChapterSelector)
     }
 }
 

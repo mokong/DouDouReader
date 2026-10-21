@@ -1,5 +1,33 @@
 import Foundation
 
+/// 换源列表上要突出的那一章：目录正序后的最后一章，或搜索结果里标明的最新章。
+nonisolated enum LatestChapterLabel {
+    static func clean(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = ["最新章节：", "最新章节:", "最新章节", "最新更新：", "最新更新:", "最新：", "最新:"]
+        for prefix in prefixes where text.hasPrefix(prefix) {
+            text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            break
+        }
+        return text
+    }
+
+    /// 搜索卡片上已经写明的最新章。简介太长时不当成章节名。
+    static func fromSearch(latestChapter: String, summary: String) -> String {
+        let direct = clean(latestChapter)
+        if !direct.isEmpty { return direct }
+        let blurb = clean(summary)
+        guard blurb.count <= 36 else { return "" }
+        guard blurb.contains("章") || blurb.contains("回") || blurb.hasPrefix("第") else { return "" }
+        return blurb
+    }
+
+    /// 目录按正序排好后，最后一条才是这本书在该书源上的最新章节。
+    static func pick(_ chapters: [RemoteChapterRef]) -> String {
+        clean(RemoteChapterList.normalizedAscending(chapters).last?.title ?? "")
+    }
+}
+
 /// 换源列表里的一条：某个其他书源上对得上的同一本书。
 nonisolated struct SourceSwitchHit: Identifiable, Equatable, Sendable {
     var sourceID: String

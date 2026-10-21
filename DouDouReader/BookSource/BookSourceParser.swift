@@ -188,6 +188,7 @@ enum BookSourceParser {
             searchRule.detailURLSelector = (ruleSearch["bookUrl"] as? String) ?? (ruleSearch["bookURL"] as? String) ?? ""
             searchRule.summarySelector = (ruleSearch["intro"] as? String) ?? (ruleSearch["summary"] as? String) ?? ""
             searchRule.coverSelector = (ruleSearch["coverUrl"] as? String) ?? (ruleSearch["cover"] as? String) ?? ""
+            searchRule.lastChapterSelector = (ruleSearch["lastChapter"] as? String) ?? ""
         }
 
         // 目录规则
@@ -318,6 +319,10 @@ enum BookSourceParser {
             searchRule.detailURLSelector = (searchAction["detailUrl"] as? String) ?? (searchAction["url"] as? String) ?? ""
             searchRule.summarySelector = (searchAction["desc"] as? String) ?? (searchAction["intro"] as? String) ?? ""
             searchRule.coverSelector = searchAction["cover"] as? String ?? ""
+            searchRule.lastChapterSelector = (searchAction["lastChapter"] as? String)
+                ?? (searchAction["latestChapter"] as? String)
+                ?? (searchAction["newChapter"] as? String)
+                ?? ""
         }
 
         // 目录规则 chapterList

@@ -241,14 +241,10 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         tap.name = "readerTap"
         tap.cancelsTouchesInView = false
         tap.delegate = self
-        let foreign = pageController?.gestureRecognizers ?? []
-        if effectiveMode != .none {
-            for gesture in foreign where !(gesture is UITapGestureRecognizer) {
-                tap.require(toFail: gesture)
-            }
-        }
+        // 不再让 tap 等待 UIPageViewController 的滑动/拖拽手势失败。
+        // 手指抬起即可 0 延迟响应翻页或唤出菜单；若手指产生位移滑动，系统会自动将 Tap 判定为失效。
         host.addGestureRecognizer(tap)
-        linkedGestureCount = foreign.count
+        linkedGestureCount = pageController?.gestureRecognizers.count ?? 0
     }
 
     private func updateForeignGestures() {

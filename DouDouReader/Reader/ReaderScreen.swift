@@ -144,6 +144,9 @@ struct ReaderScreen: View {
     @State private var padBottom = ScreenSafeArea.windowInsets.bottom
     /// 推入动画期间只铺底色。正文和翻页控件等转场走完再挂上，避免中途卡一下。
     @State private var showOpeningSpinner = false
+    @State private var brightnessGestureActive = false
+    @State private var startBrightness: Double = 1.0
+    @State private var brightnessHUDTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -171,6 +174,7 @@ struct ReaderScreen: View {
             engine?.stopActivities()
             cacheGeneration += 1
             cacheTask?.cancel()
+            brightnessHUDTask?.cancel()
         }
     }
 
@@ -202,7 +206,16 @@ struct ReaderScreen: View {
                 if engine.isChapterLoadFailed || engine.showEndActions {
                     chapterFailureActions(engine, theme: theme)
                         .offset(y: 44)
+                } else if scrubbingChapter {
+                    scrubHUD(engine, theme: theme)
+                } else if brightnessGestureActive {
+                    brightnessHUD
                 }
+            }
+            .overlay(alignment: .leading) {
+                #if os(iOS) || os(visionOS)
+                brightnessEdgeGesture(screenHeight: proxy.size.height)
+                #endif
             }
             .overlay(alignment: .top) {
                 if engine.showsChrome {
@@ -488,6 +501,76 @@ struct ReaderScreen: View {
                     .foregroundStyle(.red)
             }
         }
+    }
+
+    /// 拖拽章节进度条时居中显示的悬浮气泡预览（清晰显示目标章节序号与名称）
+    @ViewBuilder
+    private func scrubHUD(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
+        let count = scrubCount(engine)
+        let index = Int(chapterScrub.rounded())
+        let title = chapterTitle(at: index, engine: engine)
+        VStack(spacing: 6) {
+            Text(title.isEmpty ? "第 \(index + 1) 章" : title)
+                .font(.system(size: 16, weight: .semibold))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+            Text("\(index + 1) / \(max(count, 1)) 章")
+                .font(.caption)
+                .foregroundStyle(theme.secondary.color)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+        .frame(maxWidth: 280)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .foregroundStyle(theme.text.color)
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
+        .transition(.scale(scale: 0.92).combined(with: .opacity))
+        .allowsHitTesting(false)
+    }
+
+    /// 屏幕左边缘垂直滑动微调亮度手势（香色闺阁/微信读书同款交互）
+    private func brightnessEdgeGesture(screenHeight: CGFloat) -> some View {
+        Color.clear
+            .frame(width: 38)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 12)
+                    .onChanged { value in
+                        if !brightnessGestureActive {
+                            brightnessGestureActive = true
+                            startBrightness = settings.brightness
+                        }
+                        brightnessHUDTask?.cancel()
+                        let delta = -Double(value.translation.height / max(screenHeight * 0.55, 1))
+                        settings.brightness = min(max(0.15, startBrightness + delta), 1.0)
+                    }
+                    .onEnded { _ in
+                        brightnessHUDTask?.cancel()
+                        brightnessHUDTask = Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 1_200_000_000)
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                brightnessGestureActive = false
+                            }
+                        }
+                    }
+            )
+    }
+
+    /// 亮度调节时的悬浮提示徽标
+    @ViewBuilder
+    private var brightnessHUD: some View {
+        HStack(spacing: 10) {
+            Image(systemName: settings.brightness < 0.4 ? "sun.min.fill" : "sun.max.fill")
+                .font(.system(size: 20))
+            Text("\(Int((settings.brightness * 100).rounded()))%")
+                .font(.system(size: 16, weight: .semibold, design: .monospaced))
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+        .transition(.opacity)
+        .allowsHitTesting(false)
     }
 
     private func moreMenu(_ engine: ReaderEngine) -> some View {
@@ -1205,12 +1288,11 @@ struct ReaderScreen: View {
         openBook()
     }
 
-    /// 换源后尽量停在原来要读的那一章。目录里没有同名章节时，留在已经对上的进度。
+    /// 换源后使用 ChapterMatching 模糊匹配（支持中英数字、括号过滤、核心相似度），保持原来阅读位置
     private func land(on title: String, engine: ReaderEngine) async -> Bool {
-        let wanted = BookIdentity.normalize(title)
-        guard !wanted.isEmpty else { return true }
         let chapters = RemoteChapterList.decode(book.remoteChapterList)
-        guard let index = chapters.firstIndex(where: { BookIdentity.normalize($0.title) == wanted }) else {
+        guard !chapters.isEmpty else { return true }
+        guard let index = ChapterMatching.bestMatch(wantedTitle: title, in: chapters.map(\.title)) else {
             return true
         }
         if engine.chapters.contains(where: { $0.remoteIndex == index }) {

@@ -56,6 +56,8 @@ nonisolated struct CatalogBook: Identifiable, Equatable, Sendable {
     var status: String = ""
     /// 封面图地址（来自 coverSelector），为空时由 UI 用色块占位。
     var coverURL: String = ""
+    /// 搜索结果里书源标明的最新章节。没有这条时，换源列表会再拉目录补上。
+    var latestChapter: String = ""
 }
 
 nonisolated enum SourceError: LocalizedError, Equatable {

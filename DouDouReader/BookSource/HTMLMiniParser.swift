@@ -1,4 +1,83 @@
 import Foundation
+import JavaScriptCore
+
+/// 支持阅读 3.0 与香色闺阁规则中的 @js: 动态执行与解密
+nonisolated enum RuleJSEvaluator {
+    static func evaluate(script: String, input: [String], baseURL: String = "") -> [String] {
+        let trimmed = script.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return input }
+        guard let context = JSContext() else {
+            if let literal = extractJSLiteral(trimmed) { return [literal] }
+            return input
+        }
+
+        context.evaluateScript("""
+        var console = { log: function() {} };
+        function atob(str) {
+            try {
+                return decodeURIComponent(escape(globalThis.atob ? globalThis.atob(str) : str));
+            } catch(e) {
+                return str;
+            }
+        }
+        function btoa(str) {
+            try {
+                return globalThis.btoa ? globalThis.btoa(unescape(encodeURIComponent(str))) : str;
+            } catch(e) {
+                return str;
+            }
+        }
+        """)
+
+        let joined = input.joined(separator: "\n")
+        context.setObject(joined, forKeyedSubscript: "result" as NSString)
+        context.setObject(input, forKeyedSubscript: "results" as NSString)
+        context.setObject(baseURL, forKeyedSubscript: "baseUrl" as NSString)
+
+        var jsCode = trimmed
+        if !jsCode.contains("return ") && !jsCode.hasPrefix("(function") {
+            jsCode = "return (" + jsCode + ");"
+        }
+        let wrapped = "(function(result, results, baseUrl) { " + jsCode + " })(result, results, baseUrl);"
+        guard let output = context.evaluateScript(wrapped), !output.isUndefined, !output.isNull else {
+            if let literal = extractJSLiteral(trimmed) {
+                return [literal]
+            }
+            return input
+        }
+
+        if output.isArray {
+            if let arr = output.toArray() {
+                let strings = arr.compactMap { item -> String? in
+                    let s = "\(item)".trimmingCharacters(in: .whitespacesAndNewlines)
+                    return s.isEmpty ? nil : s
+                }
+                if !strings.isEmpty { return strings }
+            }
+        }
+        let str = output.toString()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !str.isEmpty {
+            return [str]
+        }
+        if let literal = extractJSLiteral(trimmed) {
+            return [literal]
+        }
+        return input
+    }
+
+    static func extractJSLiteral(_ js: String) -> String? {
+        let returnPattern = #"return\s*['"]([^'"]*)['"]"#
+        if let regex = try? NSRegularExpression(pattern: returnPattern),
+           let match = regex.firstMatch(in: js, range: NSRange(js.startIndex..., in: js)) {
+            let value = (js as NSString).substring(with: match.range(at: 1))
+            if !value.isEmpty { return value }
+        }
+        if let urlRange = js.range(of: #"https?://[^\s'"<>\\]+"#, options: .regularExpression) {
+            return String(js[urlRange])
+        }
+        return nil
+    }
+}
 
 /// 轻量级纯 Swift HTML DOM 节点
 nonisolated final class HTMLNode: @unchecked Sendable {
@@ -13,6 +92,17 @@ nonisolated final class HTMLNode: @unchecked Sendable {
         self.attributes = attributes
         self.text = text
         self.children = []
+    }
+
+    /// 目录页经常漏写闭合标签，节点会套成一条几千层的链。
+    /// 类的释放是递归的，链一长就在函数返回时撑爆栈（EXC_BAD_ACCESS）。这里改成逐层拆掉。
+    deinit {
+        var pending = children
+        children = []
+        while let node = pending.popLast() {
+            pending.append(contentsOf: node.children)
+            node.children = []
+        }
     }
 
     /// 提取该节点及其所有子节点的合并文本内容。`<br>` 是换行，不然正文会连成一段。
@@ -72,6 +162,14 @@ nonisolated enum HTMLMiniParser {
     // MARK: - HTML 解析为 DOM 树
 
     private static let maxNodes = 40_000
+    /// 真实页面嵌套到不了这么深。再往下套就是漏闭合标签，继续套只会在释放时崩掉。
+    private static let maxDepth = 48
+    /// 这些标签在 HTML 里不能自己套自己。新的一个出现时，先把上面没闭合的那个收掉。
+    private static let tagsThatCloseThemselves: Set<String> = [
+        "a", "li", "dd", "dt", "p", "tr", "td", "th", "option",
+        "h1", "h2", "h3", "h4", "h5", "h6"
+    ]
+    private static let headingTags: Set<String> = ["h1", "h2", "h3", "h4", "h5", "h6"]
 
     static func parse(_ html: String) -> HTMLNode {
         let root = HTMLNode(tag: "root")
@@ -85,6 +183,7 @@ nonisolated enum HTMLMiniParser {
 
         var textBuffer = ""
         var elementCount = 0
+        var depth = 0
 
         while index < end {
             if html[index] == "<" {
@@ -135,6 +234,7 @@ nonisolated enum HTMLMiniParser {
                     while let ancestor = p, ancestor !== root {
                         if ancestor.tag == closingTag {
                             current = ancestor.parent ?? root
+                            depth = nestingDepth(of: current, root: root)
                             break
                         }
                         p = ancestor.parent
@@ -147,6 +247,8 @@ nonisolated enum HTMLMiniParser {
                 let rawTag = isSelfClosing ? String(tagContent.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines) : tagContent
 
                 let (tag, attrs) = parseTagAndAttributes(rawTag)
+                current = closeMatchingAncestor(tag, from: current, root: root)
+                depth = nestingDepth(of: current, root: root)
                 let node = HTMLNode(tag: tag, attributes: attrs)
                 node.parent = current
                 current.children.append(node)
@@ -176,8 +278,9 @@ nonisolated enum HTMLMiniParser {
 
                 // 处理 HTML 中常见的单闭合标签
                 let voidTags: Set<String> = ["meta", "link", "br", "hr", "img", "input", "source", "wbr", "area", "col"]
-                if !isSelfClosing && !voidTags.contains(tag) {
+                if !isSelfClosing && !voidTags.contains(tag) && depth < maxDepth {
                     current = node
+                    depth += 1
                 }
             } else {
                 textBuffer.append(html[index])
@@ -195,6 +298,57 @@ nonisolated enum HTMLMiniParser {
         }
 
         return root
+    }
+
+    /// 新的 `<a>` / `<dd>` / `<li>` 出现时，把祖先里还开着的同一个标签收掉。
+    /// 目录页常常写成 `<dd><a>第一章<dd><a>第二章`，不收的话会套成几千层。
+    /// 嵌套列表（li 里面再开 ul）会在列表边界停住，避免把外层项一起收掉。
+    private static func closeMatchingAncestor(_ tag: String, from current: HTMLNode, root: HTMLNode) -> HTMLNode {
+        guard tagsThatCloseThemselves.contains(tag) else { return current }
+        let heading = headingTags.contains(tag)
+        let barriers = scopeBarriers(for: tag)
+        var ancestor: HTMLNode? = current
+        var steps = 0
+        while let node = ancestor, node !== root, steps <= maxDepth + 8 {
+            steps += 1
+            if node.tag == tag || (heading && headingTags.contains(node.tag)) {
+                return node.parent ?? root
+            }
+            if barriers.contains(node.tag) {
+                return current
+            }
+            ancestor = node.parent
+        }
+        return current
+    }
+
+    private static func scopeBarriers(for tag: String) -> Set<String> {
+        switch tag {
+        case "li":
+            return ["ul", "ol"]
+        case "dd", "dt":
+            return ["dl"]
+        case "td", "th":
+            return ["tr", "table"]
+        case "tr":
+            return ["table"]
+        case "option":
+            return ["select"]
+        case "p":
+            return ["div", "td", "th", "li", "blockquote"]
+        default:
+            return []
+        }
+    }
+
+    private static func nestingDepth(of start: HTMLNode, root: HTMLNode) -> Int {
+        var depth = 0
+        var current: HTMLNode? = start
+        while let node = current, node !== root, depth <= maxDepth + 8 {
+            depth += 1
+            current = node.parent
+        }
+        return depth
     }
 
     private static func parseTagAndAttributes(_ raw: String) -> (String, [String: String]) {
@@ -308,29 +462,35 @@ nonisolated enum HTMLMiniParser {
             return merged
         }
 
-        let (cleanRule, targetAttr, regexReplace, literal) = parseRuleSyntax(rule)
-        // 整条规则就是 @js: 表达式时，返回从中提取出的字面量（URL 或 return 'xxx'）。
-        if let literal {
-            return applyRegex(regexReplace, to: [literal])
-        }
-        let nodes = selectNodes(root: root, selector: cleanRule)
-
+        let (cleanRule, targetAttr, regexReplace, jsSnippet) = parseRuleSyntax(rule)
         var results: [String] = []
-        for node in nodes {
-            if let targetAttr {
-                if let val = node.get(attr: targetAttr) {
-                    results.append(val)
-                }
-            } else {
-                let val = node.allText
-                if !val.isEmpty {
-                    results.append(val)
+
+        if cleanRule.isEmpty, let jsSnippet {
+            // 纯 @js: 规则：直接在 JSContext 中运行计算返回值
+            results = RuleJSEvaluator.evaluate(script: jsSnippet, input: [], baseURL: "")
+        } else {
+            let nodes = selectNodes(root: root, selector: cleanRule)
+            for node in nodes {
+                if let targetAttr {
+                    if let val = node.get(attr: targetAttr) {
+                        results.append(val)
+                    }
+                } else {
+                    let val = node.allText
+                    if !val.isEmpty {
+                        results.append(val)
+                    }
                 }
             }
         }
 
         if let (pattern, replacement) = regexReplace {
             results = applyRegex((pattern, replacement), to: results)
+        }
+
+        // 后缀 @js: 动态脚本：将前面提取的内容作为 result / results 传给 JS 做二次变形或解密
+        if let jsSnippet, !cleanRule.isEmpty {
+            results = RuleJSEvaluator.evaluate(script: jsSnippet, input: results, baseURL: "")
         }
 
         return results.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
@@ -380,9 +540,9 @@ nonisolated enum HTMLMiniParser {
             return merged
         }
 
-        let (cleanRule, _, _, literal) = parseRuleSyntax(rule)
+        let (cleanRule, _, _, jsSnippet) = parseRuleSyntax(rule)
         // 纯 @js: 列表规则无法映射成 DOM 节点，直接返回空，避免退化成整棵树。
-        if literal != nil {
+        if cleanRule.isEmpty && jsSnippet != nil {
             return []
         }
         return selectNodes(root: root, selector: cleanRule)
@@ -454,8 +614,8 @@ nonisolated enum HTMLMiniParser {
         }
     }
 
-    /// 解析规则中的属性抽取符号（如 @text, @href, /text(), /@href, Jsoup @）及正则替换（##regex##replace）
-    static func parseRuleSyntax(_ raw: String) -> (cleanSelector: String, targetAttr: String?, regexReplace: (String, String)?, literal: String?) {
+    /// 解析规则中的属性抽取符号（如 @text, @href, /text(), /@href, Jsoup @）、正则替换（##regex##replace）及 @js: 脚本
+    static func parseRuleSyntax(_ raw: String) -> (cleanSelector: String, targetAttr: String?, regexReplace: (String, String)?, jsSnippet: String?) {
         var working = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 1. 检查是否存在 ##regex##replace
@@ -472,8 +632,8 @@ nonisolated enum HTMLMiniParser {
             working = selectorPart
         }
 
-        // 2. 检查是否有 @js: 或 || @js: 规则（去掉后缀代码，保留主体选择器）
-        var jsLiteral: String? = nil
+        // 2. 检查是否有 @js: 或 || @js: 规则（提取后缀 JS 脚本，保留主体选择器）
+        var jsSnippet: String? = nil
         if let jsRange = working.range(of: "@js:") {
             let jsBody = String(working[jsRange.upperBound...])
             working = String(working[..<jsRange.lowerBound])
@@ -481,10 +641,7 @@ nonisolated enum HTMLMiniParser {
                 working = String(working.dropLast(2))
             }
             working = working.trimmingCharacters(in: .whitespacesAndNewlines)
-            // 整条规则就是 @js: 表达式时，提取字面 URL 或 return 'xxx' 字面量，避免整条规则失效。
-            if working.isEmpty {
-                jsLiteral = extractJSLiteral(jsBody)
-            }
+            jsSnippet = jsBody
         }
 
         // 2.5 去掉开头的 @css: / @xpath: 前缀，避免末尾 @ 回溯把 "css:.list" 误当成属性名。
@@ -521,32 +678,16 @@ nonisolated enum HTMLMiniParser {
 
         // 如果规则直接就是 "text" 或 "href" 等简短属性
         if working.isEmpty && targetAttr != nil {
-            return ("", targetAttr, regexReplace, jsLiteral)
+            return ("", targetAttr, regexReplace, jsSnippet)
         }
         if working.lowercased() == "text" || working.lowercased() == "text()" {
-            return ("", "text", regexReplace, jsLiteral)
+            return ("", "text", regexReplace, jsSnippet)
         }
         if working.lowercased() == "href" || working.lowercased() == "src" {
-            return ("", working.lowercased(), regexReplace, jsLiteral)
+            return ("", working.lowercased(), regexReplace, jsSnippet)
         }
 
-        return (working.trimmingCharacters(in: .whitespacesAndNewlines), targetAttr, regexReplace, jsLiteral)
-    }
-
-    /// 从 @js: 代码体中提取高频字面量：return 'xxx' / return "xxx"，或第一个字面 URL。
-    private static func extractJSLiteral(_ js: String) -> String? {
-        let returnPattern = #"return\s*['"]([^'"]*)['"]"#
-        if let regex = try? NSRegularExpression(pattern: returnPattern),
-           let match = regex.firstMatch(in: js, range: NSRange(js.startIndex..., in: js)) {
-            let value = (js as NSString).substring(with: match.range(at: 1))
-            if !value.isEmpty {
-                return value
-            }
-        }
-        if let urlRange = js.range(of: #"https?://[^\s'"<>\\]+"#, options: .regularExpression) {
-            return String(js[urlRange])
-        }
-        return nil
+        return (working.trimmingCharacters(in: .whitespacesAndNewlines), targetAttr, regexReplace, jsSnippet)
     }
 
     /// 执行通用路径选择（支持 XPath 路径、CSS 路径与 Jsoup 路径）

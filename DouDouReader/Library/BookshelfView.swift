@@ -576,30 +576,103 @@ struct BookshelfView: View {
             book.lastCheckMessage = "书源失效，请换源"
             book.updateAvailable = false
             try? modelContext.save()
-            let message = "《\(book.title)》检查失败：\(friendlyCheckError(error))"
+            let message = "《\(book.title)》检查失败：\(Self.friendlyCheckError(error))"
             if !silent { notice = message }
             return message
         }
     }
 
-    /// 批量检查时不逐本弹窗。一本失败就弹窗的话，下拉刷新还没跑完，转圈会被 alert 取消。
+    /// 批量检查：采用受控并发（最多 5 路并发），全量完成后批量落盘一次，避免逐本保存引起书架频繁重排。
     @discardableResult
     private func checkAllUpdates(silent: Bool = false) async -> String? {
         checkingUpdates = true
-        defer { checkingUpdates = false }
+        defer {
+            checkingUpdates = false
+            updatingBookIDs.removeAll()
+        }
         let online = visibleBooks.filter { !$0.remoteBookID.isEmpty }
         guard !online.isEmpty else {
             return silent ? nil : "书架上没有需要检查的在线书"
         }
+        online.forEach { updatingBookIDs.insert($0.id) }
+
+        let switchableSources = BookSourceLibrary.switchable(records: sourceRecords)
+        struct BookUpdateTask: Sendable {
+            var id: UUID
+            var title: String
+            var remoteSourceID: String
+            var remoteBookID: String
+        }
+        struct BookUpdateResult: Sendable {
+            var id: UUID
+            var title: String
+            var chapters: [RemoteChapterRef]?
+            var errorMessage: String?
+        }
+
+        let tasks = online.map {
+            BookUpdateTask(
+                id: $0.id,
+                title: $0.title,
+                remoteSourceID: $0.remoteSourceID,
+                remoteBookID: $0.remoteBookID
+            )
+        }
+
+        let concurrency = min(5, tasks.count)
         var updated = 0
         var failures: [String] = []
-        for book in online {
-            if let failure = await checkUpdate(book: book, silent: true) {
-                failures.append(failure)
-            } else if book.updateAvailable {
-                updated += 1
+
+        await withTaskGroup(of: BookUpdateResult.self) { group in
+            var taskIndex = 0
+            func enqueue() {
+                guard taskIndex < tasks.count else { return }
+                let item = tasks[taskIndex]
+                taskIndex += 1
+                group.addTask {
+                    guard let source = switchableSources.first(where: { $0.id == item.remoteSourceID }),
+                          let catalog = BookSourceLibrary.catalog(for: source) as? IncrementalBookCatalog else {
+                        return BookUpdateResult(id: item.id, title: item.title, chapters: nil, errorMessage: "书源失效，请换源")
+                    }
+                    do {
+                        let toc = try await catalog.fetchTOC(bookID: item.remoteBookID)
+                        return BookUpdateResult(id: item.id, title: item.title, chapters: toc.chapters, errorMessage: nil)
+                    } catch {
+                        return BookUpdateResult(id: item.id, title: item.title, chapters: nil, errorMessage: Self.friendlyCheckError(error))
+                    }
+                }
+            }
+
+            for _ in 0..<concurrency {
+                enqueue()
+            }
+
+            while let res = await group.next() {
+                updatingBookIDs.remove(res.id)
+                if let book = online.first(where: { $0.id == res.id }) {
+                    if let remoteChapters = res.chapters {
+                        let local = RemoteChapterList.decode(book.remoteChapterList)
+                        let outcome = BookUpdateComparison.compare(local: local, remote: remoteChapters)
+                        book.remoteChapterList = RemoteChapterList.encode(remoteChapters)
+                        book.updateAvailable = outcome.hasUpdate
+                        book.newChapterCount = outcome.newChapterCount
+                        book.latestRemoteChapterTitle = outcome.latestTitle
+                        book.lastCheckMessage = outcome.hasUpdate ? "发现 \(outcome.newChapterCount) 章更新" : "已是最新"
+                        if outcome.hasUpdate { updated += 1 }
+                    } else {
+                        let errorMsg = res.errorMessage ?? "书源失效，请换源"
+                        book.lastCheckMessage = errorMsg
+                        book.updateAvailable = false
+                        failures.append("《\(res.title)》\(errorMsg)")
+                    }
+                }
+                enqueue()
             }
         }
+
+        // 仅在全量并发拉取完成后统一保存一次，消除反复重排
+        try? modelContext.save()
+
         guard !silent else { return nil }
         if updated == 0, failures.count == 1 {
             return failures[0]
@@ -608,7 +681,7 @@ struct BookshelfView: View {
         return "检查完成：\(updated) 本有更新\(failedNote)"
     }
 
-    private func friendlyCheckError(_ error: Error) -> String {
+    private nonisolated static func friendlyCheckError(_ error: Error) -> String {
         if let urlError = error as? URLError {
             switch urlError.code {
             case .notConnectedToInternet, .timedOut, .cannotFindHost, .cannotConnectToHost:

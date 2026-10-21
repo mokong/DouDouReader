@@ -16,6 +16,13 @@ struct SourceSwitchSheet: View {
     @State private var busyID: String?
     @State private var errorText: String?
     @State private var searchTask: Task<Void, Never>?
+    /// 目录拉回来的最新章节。搜索卡片上没有这一章时才去补。
+    @State private var fetchedChapters: [String: String] = [:]
+    @State private var failedChapterIDs: Set<String> = []
+    @State private var loadingChapterIDs: Set<String> = []
+    @State private var catalogGeneration = 0
+    @State private var catalogGate = SwitchCatalogGate()
+    @State private var catalogTasks: [Task<Void, Never>] = []
 
     private var hits: [SourceSwitchHit] {
         BookSearch.switchHits(
@@ -61,7 +68,15 @@ struct SourceSwitchSheet: View {
             }
         }
         .onAppear(perform: start)
-        .onDisappear { searchTask?.cancel() }
+        .onDisappear {
+            searchTask?.cancel()
+            catalogGeneration += 1
+            catalogTasks.forEach { $0.cancel() }
+            catalogTasks.removeAll()
+        }
+        .onChange(of: hits.map(\.id)) { _, _ in
+            loadLatestChapters()
+        }
     }
 
     private var header: String {
@@ -100,26 +115,26 @@ struct SourceSwitchSheet: View {
     }
 
     private func row(_ hit: SourceSwitchHit) -> some View {
-        Button {
+        let chapter = shownChapter(hit)
+        let hasChapter = !chapter.isEmpty
+        return Button {
             choose(hit)
         } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(hit.book.title.isEmpty ? bookTitle : hit.book.title)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(meta(hit))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                if busyID == hit.id {
-                    Text("正在换到这个书源")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(Color.accentColor)
-                } else if !latestLine(hit).isEmpty {
-                    Text(latestLine(hit))
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(hasChapter ? chapter : placeholder(hit))
+                        .font(.body)
+                        .foregroundStyle(hasChapter ? Color.primary : Color.secondary)
+                        .lineLimit(2)
+                    Text(hit.sourceName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if busyID == hit.id || (chapter.isEmpty && loadingChapterIDs.contains(hit.id)) {
+                    ProgressView()
+                        .controlSize(.small)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -127,21 +142,61 @@ struct SourceSwitchSheet: View {
         }
         .buttonStyle(.plain)
         .disabled(busyID != nil)
+        .accessibilityLabel(accessibilityText(hit, chapter: chapter))
     }
 
-    private func latestLine(_ hit: SourceSwitchHit) -> String {
-        let summary = hit.book.summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !summary.isEmpty else { return "" }
-        if summary.contains("章") || summary.contains("回") {
-            return "最新 \(summary)"
+    /// 主行是最新章节。搜索结果里有就先用，没有就等目录拉回来。
+    private func shownChapter(_ hit: SourceSwitchHit) -> String {
+        if let fetched = fetchedChapters[hit.id], !fetched.isEmpty { return fetched }
+        return LatestChapterLabel.fromSearch(latestChapter: hit.book.latestChapter, summary: hit.book.summary)
+    }
+
+    private func placeholder(_ hit: SourceSwitchHit) -> String {
+        if failedChapterIDs.contains(hit.id) { return "没有读到最新章节" }
+        return "正在读取最新章节"
+    }
+
+    private func accessibilityText(_ hit: SourceSwitchHit, chapter: String) -> String {
+        let chapterText = chapter.isEmpty ? placeholder(hit) : chapter
+        return "\(chapterText)，\(hit.sourceName)"
+    }
+
+    private func loadLatestChapters() {
+        let generation = catalogGeneration
+        for hit in hits {
+            let stated = hit.book.latestChapter.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !stated.isEmpty { continue }
+            if fetchedChapters[hit.id] != nil || failedChapterIDs.contains(hit.id) || loadingChapterIDs.contains(hit.id) {
+                continue
+            }
+            loadingChapterIDs.insert(hit.id)
+            guard let source = sources.first(where: { $0.id == hit.sourceID }) else {
+                loadingChapterIDs.remove(hit.id)
+                failedChapterIDs.insert(hit.id)
+                continue
+            }
+            let bookID = hit.book.id
+            let hitID = hit.id
+            let gate = catalogGate
+            let task = Task { @MainActor in
+                await gate.acquire()
+                if Task.isCancelled || generation != catalogGeneration {
+                    await gate.release()
+                    return
+                }
+                // 目录解析离开主线程。停在主线程上时，列表一滚动就和建树抢同一条栈。
+                let title = await latestChapterTitle(source: source, bookID: bookID)
+                await gate.release()
+                guard !Task.isCancelled, generation == catalogGeneration else { return }
+                loadingChapterIDs.remove(hitID)
+                if let title, !title.isEmpty {
+                    fetchedChapters[hitID] = title
+                } else {
+                    failedChapterIDs.insert(hitID)
+                }
+            }
+            catalogTasks.append(task)
         }
-        return summary
-    }
-
-    private func meta(_ hit: SourceSwitchHit) -> String {
-        let who = hit.book.author.trimmingCharacters(in: .whitespacesAndNewlines)
-        let authorText = who.isEmpty || who == "未知作者" ? "" : who
-        return [authorText, hit.sourceName].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private func start() {
@@ -177,6 +232,42 @@ struct SourceSwitchSheet: View {
             let message = await onSelect(source, hit.book)
             busyID = nil
             errorText = message
+        }
+    }
+}
+
+/// 拉目录并取出最后一章。走并发线程池，避免在主线程上解析整份目录。
+@concurrent
+private func latestChapterTitle(source: SwitchableSource, bookID: String) async -> String? {
+    guard let catalog = BookSourceLibrary.catalog(for: source) as? IncrementalBookCatalog else { return nil }
+    do {
+        let toc = try await catalog.fetchTOC(bookID: bookID)
+        let title = LatestChapterLabel.pick(toc.chapters)
+        return title.isEmpty ? nil : title
+    } catch {
+        return nil
+    }
+}
+
+/// 换源时同时拉多个书源的目录，最多三路，避免把站点打满。
+private actor SwitchCatalogGate {
+    private var active = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private let limit = 3
+
+    func acquire() async {
+        if active < limit {
+            active += 1
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            active = max(0, active - 1)
+        } else {
+            waiters.removeFirst().resume()
         }
     }
 }

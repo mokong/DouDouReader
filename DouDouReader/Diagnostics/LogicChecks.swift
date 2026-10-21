@@ -32,6 +32,7 @@ enum LogicChecks {
         checkLazyChapter(&errors)
         checkReaderCatalog(&errors)
         checkBookIdentity(&errors)
+        checkChapterMatching(&errors)
         checkSparseChapter(&errors)
         checkEncoding(&errors)
         checkAuthor(&errors)
@@ -45,6 +46,8 @@ enum LogicChecks {
         checkEpub(&errors)
         checkBookSearch(&errors)
         checkSourceSwitchHits(&errors)
+        checkLatestChapterLabel(&errors)
+        checkUnclosedChapterList(&errors)
         checkXBS(&errors)
         checkBookUpdateComparison(&errors)
         checkReaderTapZones(&errors)
@@ -312,6 +315,24 @@ enum LogicChecks {
         }
     }
 
+    private static func checkChapterMatching(_ errors: inout [String]) {
+        let candidates = [
+            "第1章 决战光明顶",
+            "第2章 华山论剑",
+            "第3章 尾声（全书完）"
+        ]
+        if ChapterMatching.bestMatch(wantedTitle: "第一章 决战光明顶", in: candidates) != 0 {
+            errors.append("中英文数字章节应该匹配成功")
+        }
+        if ChapterMatching.bestMatch(wantedTitle: "尾声", in: candidates) != 2 {
+            errors.append("括号清洗后应该匹配成功")
+        }
+        let jsResult = RuleJSEvaluator.evaluate(script: "result.replace(/world/, 'doudou')", input: ["hello world"])
+        if jsResult != ["hello doudou"] {
+            errors.append("JavaScriptCore 执行替换应该成功")
+        }
+    }
+
     /// 跳到后面的章节只下载那一章。滑到交界处才要相邻的一章。
     private static func checkSparseChapter(_ errors: inout [String]) {
         let settings = ReaderSettingsStore(loadSaved: false)
@@ -405,6 +426,69 @@ enum LogicChecks {
         )
         if hits.map(\.sourceID) != ["other"] || hits.map(\.book.id) != ["ok"] {
             errors.append("换源应当只留下其他书源里的同一本书")
+        }
+    }
+
+    private static func checkLatestChapterLabel(_ errors: inout [String]) {
+        let newestFirst = [
+            RemoteChapterRef(title: "第3章 结局", url: "c"),
+            RemoteChapterRef(title: "第1章 开始", url: "a")
+        ]
+        if LatestChapterLabel.pick(newestFirst) != "第3章 结局" {
+            errors.append("倒序目录应当把最新章放在主行")
+        }
+        let ascending = [
+            RemoteChapterRef(title: "第一章 开始", url: "a"),
+            RemoteChapterRef(title: "第9章 雨", url: "b")
+        ]
+        if LatestChapterLabel.pick(ascending) != "第9章 雨" {
+            errors.append("正序目录应当显示最后一章")
+        }
+        if LatestChapterLabel.pick([]) != "" {
+            errors.append("空目录不应当编出章节名")
+        }
+        if LatestChapterLabel.clean("最新章节：第8章 夜航") != "第8章 夜航" {
+            errors.append("最新章节前缀没有去掉")
+        }
+        let stated = LatestChapterLabel.fromSearch(latestChapter: "第12章 岸", summary: "这是一段很长的简介，里面虽然有章字也不该当成章节名来显示。")
+        if stated != "第12章 岸" {
+            errors.append("搜索结果里的最新章节应当优先于简介")
+        }
+        let short = LatestChapterLabel.fromSearch(latestChapter: "", summary: "第4章 回信")
+        if short != "第4章 回信" {
+            errors.append("像章节名的短简介可以先显示")
+        }
+        let blurb = LatestChapterLabel.fromSearch(latestChapter: "", summary: "海岸北端的灯塔邮局，守塔人把地址写清楚。")
+        if !blurb.isEmpty {
+            errors.append("普通简介不应当当成最新章节")
+        }
+    }
+
+    /// 目录页常漏写 </dd></a>。套成几千层时，读完释放 DOM 会撑爆栈。
+    private static func checkUnclosedChapterList(_ errors: inout [String]) {
+        var html = "<div id=\"list\">"
+        for index in 1...2000 {
+            html += "<dd><a href=\"/c/\(index)\">第\(index)章"
+        }
+        html += "</div>"
+        let root = HTMLMiniParser.parse(html)
+        let links = HTMLMiniParser.queryNodes(root: root, rule: "//a")
+        if links.count != 2000 {
+            errors.append("未闭合目录应当列出每一章 \(links.count)")
+            return
+        }
+        if links[0].allText != "第1章" || links[1999].allText != "第2000章" {
+            errors.append("未闭合目录的章节名不应串在一起 \(links[0].allText) / \(links[1999].allText)")
+        }
+        var depth = 0
+        var node: HTMLNode? = links[1999]
+        while let current = node, current.tag != "root" {
+            depth += 1
+            node = current.parent
+            if depth > 32 { break }
+        }
+        if depth > 32 {
+            errors.append("未闭合目录嵌套过深 \(depth)")
         }
     }
 
@@ -634,7 +718,8 @@ enum LogicChecks {
               "name": ".title@text",
               "author": ".author@text",
               "bookUrl": ".title a@href",
-              "intro": ".desc@text"
+              "intro": ".desc@text",
+              "lastChapter": ".latest@text"
             },
             "ruleToc": {
               "chapterList": ".chapters a",
@@ -662,6 +747,9 @@ enum LogicChecks {
                 }
                 if first.searchRule.nameSelector != ".title@text" || first.contentRule.replaceRules != ["##广告.*##"] {
                     errors.append("阅读 3.0 规则选择器不符")
+                }
+                if first.searchRule.lastChapterSelector != ".latest@text" {
+                    errors.append("阅读 3.0 最新章节选择器不符")
                 }
             }
         } catch {
