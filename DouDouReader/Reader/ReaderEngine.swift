@@ -531,10 +531,13 @@ final class ReaderEngine {
         askedForCatalogRefresh = false
         if viewingEnd {
             layoutRevision += 1
-            animateNextTurn = true
+            animateNextTurn = false
             position = ReaderPosition(chapterIndex: oldCount, pageIndex: 0)
+        } else {
+            layoutRevision += 1
         }
         commit()
+        schedulePrelayoutNextChapter(current: position.chapterIndex)
         return true
     }
 
@@ -612,7 +615,7 @@ final class ReaderEngine {
         askedForCatalogRefresh = false
         if waiting {
             layoutRevision += 1
-            animateNextTurn = true
+            animateNextTurn = false
             let forward = originRemote.map { target > $0 } ?? true
             if forward {
                 position = ReaderPosition(chapterIndex: insertAt, pageIndex: 0)
@@ -625,8 +628,14 @@ final class ReaderEngine {
             position = ReaderPosition(chapterIndex: chapters.count, pageIndex: 0)
         } else if insertAt <= oldPosition.chapterIndex {
             position = ReaderPosition(chapterIndex: oldPosition.chapterIndex + 1, pageIndex: oldPosition.pageIndex)
+        } else {
+            // 后台静默插入了后续章节（预取成功）：
+            // 递增 layoutRevision 通知 ReaderPagesController 刷新 UIPageViewController 缓存的下一页视图控制器，
+            // 避免用户翻页时依然展示旧的“正在加载下一章”占位页。
+            layoutRevision += 1
         }
         commit()
+        schedulePrelayoutNextChapter(current: position.chapterIndex)
         return true
     }
 

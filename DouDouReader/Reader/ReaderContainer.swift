@@ -90,7 +90,15 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
             let direction = direction(from: displayed, to: target)
             displayed = target
             appliedRevision = revision
-            pageController.setViewControllers([makePage(target)], direction: direction, animated: animated)
+            let targetVC = makePage(target)
+            pageController.setViewControllers([targetVC], direction: direction, animated: animated) { [weak self] finished in
+                if animated && finished {
+                    DispatchQueue.main.async {
+                        guard let self, self.displayed == target else { return }
+                        self.pageController?.setViewControllers([targetVC], direction: direction, animated: false, completion: nil)
+                    }
+                }
+            }
         } else if let visible = pageController.viewControllers?.first as? PageContentController {
             visible.apply(textRect: textRect, theme: theme, fontName: settings.fontName)
             if visible.position == engine.position {

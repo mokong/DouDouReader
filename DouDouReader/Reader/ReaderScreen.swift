@@ -123,8 +123,8 @@ struct ReaderScreen: View {
     /// 打开书时解析一次的目录执行器，翻章复用；换源（remoteSourceID 变化）时自动重建。
     @State private var cachedCatalog: IncrementalBookCatalog?
     @State private var cachedCatalogSourceID: String?
-    /// 已静默预取到的远端章节 index，避免重复预取。
-    @State private var prefetchedUpTo: Int = -1
+    /// 已静默预取过的远端章节 index 集合，避免重复并发抓取。
+    @State private var prefetchedRemoteIndices: Set<Int> = []
     @State private var showSourceSwitch = false
     @State private var switchChapterTitle = ""
     @State private var showCache = false
@@ -258,12 +258,15 @@ struct ReaderScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .preferredColorScheme(theme.isDark ? .dark : .light)
-        .onAppear { sync(engine) }
+        .onAppear {
+            sync(engine)
+            prefetchNextChapterIfNeeded(engine: engine)
+        }
         .onChange(of: settings.revision) { _, _ in sync(engine) }
         .onChange(of: deviceColorScheme) { _, _ in sync(engine) }
         .onChange(of: settings.keepScreenOn) { _, _ in updateIdleTimer() }
         // 预取触发放在 reader 主视图上：bottomPanel 仅在工具栏可见时存在，
-        // 放在那里会导致默认隐藏工具栏时章末不预取。prefetchedUpTo 保证同一章不重复。
+        // 放在那里会导致默认隐藏工具栏时章末不预取。prefetchedRemoteIndices 保证同一章不重复并发。
         .onChange(of: engine.position) { _, _ in
             prefetchNextChapterIfNeeded(engine: engine)
         }
@@ -1064,6 +1067,7 @@ struct ReaderScreen: View {
         created.applySettings(settings, interfaceDark: deviceColorScheme == .dark)
         engine = created
         updateIdleTimer()
+        prefetchNextChapterIfNeeded(engine: created)
     }
 
     private func selectCatalogChapter(_ index: Int, engine: ReaderEngine) {
@@ -1082,6 +1086,7 @@ struct ReaderScreen: View {
             showCatalog = false
             engine.showsChrome = false
             catalogStatus = nil
+            prefetchNextChapterIfNeeded(engine: engine)
             return
         }
         catalogError = nil
@@ -1094,6 +1099,7 @@ struct ReaderScreen: View {
                 catalogFailedIndex = nil
                 showCatalog = false
                 engine.showsChrome = false
+                self.prefetchNextChapterIfNeeded(engine: engine)
             } else if catalogError == nil {
                 catalogError = "这一章加载失败"
             }
@@ -1140,23 +1146,36 @@ struct ReaderScreen: View {
         }
     }
 
-    /// 距本章末尾约 2 页（或本章仅 1 页）时，后台静默预取下一章，失败不打扰阅读。
+    /// 后台静默预取后续章节（类似香色闺阁体验：保持当前阅读章后预取 1-2 章缓存，网络好时无缝翻页）。
     private func prefetchNextChapterIfNeeded(engine: ReaderEngine) {
+        prefetchBufferChaptersIfNeeded(engine: engine)
+    }
+
+    private func prefetchBufferChaptersIfNeeded(engine: ReaderEngine) {
         guard !book.remoteBookID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !chapterFetchInFlight else { return }
         let chapterIndex = engine.position.chapterIndex
-        guard let layout = engine.layout(for: chapterIndex) else { return }
-        let totalPages = layout.characterRanges.count
-        let page = engine.position.pageIndex
-        let nearEnd = totalPages <= 1 || page >= totalPages - 2
-        guard nearEnd else { return }
-        let nextIndex = chapterIndex + 1
-        guard nextIndex > prefetchedUpTo else { return }
-        guard !engine.chapters.contains(where: { $0.remoteIndex == nextIndex }) else { return }
+        guard engine.chapters.indices.contains(chapterIndex) else { return }
+        let currentRemote = engine.chapters[chapterIndex].remoteIndex
         let remoteList = RemoteChapterList.decode(book.remoteChapterList)
-        guard remoteList.indices.contains(nextIndex) else { return }
-        prefetchedUpTo = nextIndex
-        Task {
-            _ = await loadRemoteChapter(nextIndex, into: engine, jumpAfter: false, generation: nil, reportFailure: false)
+        guard !remoteList.isEmpty else { return }
+
+        // 优先预取当前阅读章的下一章 (currentRemote + 1)，若已存在则继续预取下一章 (currentRemote + 2)，保证平滑缓冲区
+        let candidates = [currentRemote + 1, currentRemote + 2]
+        for targetRemote in candidates {
+            guard targetRemote < remoteList.count else { break }
+            guard !engine.chapters.contains(where: { $0.remoteIndex == targetRemote }) else { continue }
+            guard !prefetchedRemoteIndices.contains(targetRemote) else { continue }
+
+            prefetchedRemoteIndices.insert(targetRemote)
+            Task {
+                let success = await loadRemoteChapter(targetRemote, into: engine, jumpAfter: false, generation: nil, reportFailure: false)
+                if !success {
+                    // 预取失败时从集合移除，后续翻页或阅读时可再次尝试
+                    prefetchedRemoteIndices.remove(targetRemote)
+                }
+            }
+            break // 每次启动一个任务，下载完成后会链式触发下一个
         }
     }
 
@@ -1173,7 +1192,13 @@ struct ReaderScreen: View {
     ) async -> Bool {
         let ticket = readerGeneration
         if engine.chapters.contains(where: { $0.remoteIndex == index }) {
-            if jumpAfter { engine.jumpToRemote(index) }
+            if jumpAfter {
+                engine.jumpToRemote(index)
+            } else if engine.position.boundaryRemote == index,
+                      let engineIndex = engine.chapters.firstIndex(where: { $0.remoteIndex == index }) {
+                // 如果人正停在交界等待这一章，而该章已在内存中，立即切入该章第一页，避免卡在空白交界页
+                engine.adopt(position: ReaderPosition(chapterIndex: engineIndex, pageIndex: 0))
+            }
             return true
         }
         if !allowConcurrent {
@@ -1255,6 +1280,9 @@ struct ReaderScreen: View {
             try? modelContext.save()
             if jumpAfter, generation == nil || generation == catalogGeneration {
                 engine.jumpToRemote(index)
+            } else if !jumpAfter {
+                // 下载成功后继续静默预取缓冲区下一章
+                prefetchBufferChaptersIfNeeded(engine: engine)
             }
             return true
         } catch {
@@ -1302,7 +1330,7 @@ struct ReaderScreen: View {
     /// 章节交界加载失败后的重试：先清掉串行闸门和预取标记，再重置引擎状态并重新下载。
     private func retryFailedChapter(_ remote: Int, into engine: ReaderEngine) {
         chapterFetchInFlight = false
-        prefetchedUpTo = -1
+        prefetchedRemoteIndices.remove(remote)
         engine.retryCurrentChapter()
     }
 
@@ -1395,7 +1423,7 @@ struct ReaderScreen: View {
         engine = nil
         cachedCatalog = nil
         cachedCatalogSourceID = nil
-        prefetchedUpTo = -1
+        prefetchedRemoteIndices.removeAll()
         openBook()
     }
 

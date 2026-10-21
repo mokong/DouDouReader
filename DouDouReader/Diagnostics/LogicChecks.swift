@@ -377,6 +377,9 @@ enum LogicChecks {
             errors.append("补上相邻章节后应进入该章 \(engine.chapters.map(\.remoteIndex))")
             return
         }
+        if engine.animateNextTurn {
+            errors.append("交界处下载完成后应直接显示该章第一页，不应触发翻页动画导致白屏")
+        }
         let first = ChapterSplitter.substring(engine.source, start: engine.chapters[0].bodyStart, end: engine.chapters[0].bodyEnd)
         let second = ChapterSplitter.substring(engine.source, start: engine.chapters[1].bodyStart, end: engine.chapters[1].bodyEnd)
         if !first.contains("很短") || !second.contains("相邻") {
