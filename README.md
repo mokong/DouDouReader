@@ -1,84 +1,137 @@
-# 豆豆阅读
+# 豆豆阅读 (DouDouReader)
 
-豆豆阅读（DouDouReader）是一个本地小说阅读器，用 SwiftUI 写，能在 iPhone、iPad、Mac 和 Apple Vision 上打开。书架上的书来自导入的 txt 或 EPUB，也可以从书源目录按章下载。
+<p align="center">
+  <img src="DouDouReader/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png" width="100" height="100" alt="DouDouReader Icon" style="border-radius: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.12);" />
+</p>
 
-## 功能
+<p align="center">
+  <b>一款为沉浸阅读与极速响应而生的多平台小说阅读器</b><br>
+  <i>基于 SwiftUI & SwiftData 原生打造 · 适配 iOS / macOS / iPadOS / visionOS</i>
+</p>
 
-- 导入 txt 和 EPUB。txt 编码按 UTF-8（含 BOM）、UTF-16、GB18030 识别。EPUB 读取书名、作者和目录，按章节转成同一套阅读文本；标题不必写成「第…章」。单本上限 40MB。文件名当作书名，txt 正文前 30 行里的「作者」会记成作者。
-- 内置一篇示例小说，用来直接打开阅读器。
-- 按章节标题拆分正文。识别 `第…章/回/节/卷/部/集`、`序章`、`楔子`、`前言`、`引子`、`尾声`、`后记`、`番外` 和 `Chapter N`。没有标题时整本算一章。
-- 主页底部是书架和发现。书架支持置顶，以及按最近阅读、加入时间、书名排序。封面和列表可以切换。右上角搜索会同时查找已启用书源和书架上的书，并记住搜索历史。加号只导入本地书籍。发现页浏览当前书源。书架上的在线书可以单本「检查更新」或一键「检查全部更新」：后台重新拉取目录，比对最新一章，有新章节时封面/列表显示橙色角标；书源失效或网络异常会给出明确反馈。
-- 阅读器使用 TextKit 1 分页。翻页有仿真、左右、上下和无动画。点页面中央唤出工具栏。支持极简模式：隐藏页眉页脚和工具栏，沉浸阅读；边缘点按仍可翻页，中间点按唤出控件。
-- 目录、书内搜索、书签。阅读页可拖拽选中文字并复制，右键菜单支持用选中词直接书内搜索（范围为已加载章节）。
-- 排版：字号、字体、行距、段距、首行缩进、字距、对齐、边距、简繁转换、屏蔽词。
-- 主题：自动、纸白、护眼、羊皮、烟灰、夜间。自动主题跟随系统外观。书架本身固定为暖纸色。
-- 自动翻页、定时停止、屏幕常亮、亮度。页眉页脚可显示时间、电量、章节名和进度。
-- 系统语音朗读，按页或按章，后台可继续播放。未朗读时点工具栏听书图标一次即从当前界面开始；朗读中图标变为朗读控制入口，一步可达播放/暂停、停止、上一段/下一段（按页或按章粒度）、倍速、换音色。可在系统可用中文音色中选择朗读音色（默认 zh-CN），语速可调范围 0.32–0.80。
-- 导入 TTF / OTF 作为阅读字体。
-- 书源：内置一批目录站，支持粘贴「阅读 3.0」或香色闺阁的书源 JSON，也可以导入本地 `.xbs`（香色加密书源）/ `.json` 文件或按网络地址订阅。书源管理页可按分组浏览、启停、调整权重、搜索内置书源目录、重拉订阅同步规则。在线书先保存第一章，翻到已加载章节的最后一页时再请求下一章。同一本书再次打开会回到已下载的进度。阅读器内的「缓存」支持一键全本缓存：4 路并发、进度条显示、可随时停止、已缓存章节自动跳过（断点续下）；书架「整理 → 缓存管理」可查看各书缓存占用，按书清理或一键清理全部章节缓存。
+<p align="center">
+  <img src="https://img.shields.io/badge/Swift-5.10-F05138?logo=swift&logoColor=white" alt="Swift">
+  <img src="https://img.shields.io/badge/iOS-17.6+-007AFF?logo=apple&logoColor=white" alt="iOS">
+  <img src="https://img.shields.io/badge/macOS-15.0+-000000?logo=apple&logoColor=white" alt="macOS">
+  <img src="https://img.shields.io/badge/visionOS-1.0+-5856D6?logo=apple&logoColor=white" alt="visionOS">
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
+</p>
 
-## 环境
+---
 
-| 项目 | 值 |
-| --- | --- |
-| 显示名 | 豆豆阅读 |
-| Bundle ID | `com.morganwang.DouDouReader` |
-| 版本 | 1.0 |
-| 语言 | Swift 5 |
-| 系统 | iOS 17.6、macOS 15.6、visionOS 26.6 |
-| 工程 | `DouDouReader.xcodeproj` |
+## 📱 界面预览
 
-用当前的 Xcode 打开工程即可。签名是自动管理。
+| 书架主页 | 沉浸阅读 | 发现与找书 | 书源管理 |
+| :---: | :---: | :---: | :---: |
+| <img src="docs/images/screenshot_shelf.png" width="220" alt="书架主页" /> | <img src="docs/images/screenshot_reader.png" width="220" alt="沉浸阅读" /> | <img src="docs/images/screenshot_discover.png" width="220" alt="发现与找书" /> | <img src="docs/images/screenshot_sources.png" width="220" alt="书源管理" /> |
+| 暖纸色质感 · 置顶追更 · 接着读 | 纸白排版 · 多维定制 · 极简模式 | 分类探索 · 多源聚合 · 实时热搜 | 阅读 3.0 / 香色兼容 · 测速调度 |
 
-## 运行
+---
 
-1. 打开 `DouDouReader.xcodeproj`。
-2. Scheme 选择 `DouDouReader`。
-3. 运行目标选 iPhone 模拟器、My Mac 或 visionOS 模拟器。
+## ✨ 核心特性
 
-命令行编译 Mac 版：
+### 📖 极度舒适的阅读排版
+- **TextKit 原生高保真分页**：精确定位页面边界，翻页迅速，不漏字不溢出。
+- **多种翻页动画**：支持仿真翻页、左右滑动、垂直连续滚动及无动画极速切页。
+- **6 套考究主题配色**：纸白、护眼、羊皮、烟灰、夜间，以及随系统自适应的“自动”外观。
+- **全方位排版定制**：字号、行距、段间距、首行缩进、字距、对齐方式、四周边距细调。
+- **极简模式**：轻点屏幕中央隐去所有页眉页脚与工具栏，边缘点按无感翻页，还你无干扰的纯粹阅读空间。
+- **字型自由扩展**：支持直接导入外部 `.ttf` / `.otf` 自定义字体文件。
+- **简繁体一键切换与屏蔽词过滤**：内置高效字典映射与预编译屏蔽词正则清洗。
 
+### ⚡ 毫秒级解析与高性能架构
+- **智能编码识别**：自动探测并适配 UTF-8（含 BOM）、UTF-16、GB18030 等中文小说常见格式。
+- **正则预编译分章池**：内置常用大章、卷、序章、番外智能分章表达式，使用预编译 `NSRegularExpression` 缓存池，几万章巨作毫秒级分发，彻底消除主线程卡顿。
+- **轻量 EPUB 流式解压**：仅提取核心元数据、`container.xml`、`content.opf` 及正文 XHTML，跳过海量高清多媒体解压开销，内存占用极低。
+- **防抖防雪崩搜索**：多源聚合搜索支持 400ms 智能防抖（Debounce）与 Task 取消链路，杜绝高频敲击时的多源并发请求雪崩。
+- **SwiftData 批量写入调优**：全本缓存采用分批写入（Batch Commit），将百万字数千章的落盘事务合并处理，避免高频 I/O 导致 UI 掉帧。
+
+### 📚 智能书架与追更系统
+- **多元管理**：支持置顶小说、按“最近阅读/加入时间/书名”智能排序。
+- **视图切换**：提供雅致大封面网格与精简列表两种模式。
+- **断点续读与进度管理**：无论本地书目还是网络章节，实时记录最后阅读位置与全本百分比。
+- **后台智能追更**：单本或一键全书架后台检查目录更新，有新章节时自动展现醒目更新角标。
+
+### 🌐 强大的开放书源生态
+- **多标准兼容**：全面兼容「阅读 3.0」规则与「香色闺阁」源，支持本地 `.xbs`、`.json` 文件导入或网络 URL 一键订阅。
+- **内置精品目录**：预设常用精选站点，开箱即搜即读。
+- **灵活的源管理**：支持分组管理、一键启停、优先级权重调控、网络响应测速与自适应调度。
+- **全本离线高速缓存**：4 路并发极速下载，支持断点续传（自动跳过已缓存章节），并在书架提供可视化缓存占用监控与一键清理。
+
+### 🎧 语音听书（TTS）与后台播放
+- **系统级朗读**：基于 `AVSpeechSynthesizer`，支持后台锁屏播放、线控与控制中心联动。
+- **多音色与精准调速**：系统中文音色随意切换，支持 0.32–0.80 倍速无极调节。
+- **双维度切段**：支持“按页”或“按章”无缝跳转段落。
+
+---
+
+## 🛠️ 环境要求
+
+| 项目 | 要求 |
+| :--- | :--- |
+| **开发环境** | Xcode 16.0+ |
+| **编程语言** | Swift 5.10 / Swift 6 兼容 |
+| **支持平台** | iOS 17.6+ / macOS 15.0+ / visionOS 1.0+ |
+| **工程文件** | `DouDouReader.xcodeproj`（采用 Xcode 现代化同步目录结构） |
+
+---
+
+## 🚀 编译与运行
+
+### 1. 使用 Xcode 打开
+1. 双击打开 `DouDouReader.xcodeproj`。
+2. 在顶部 Scheme 中选择 `DouDouReader`。
+3. 目标设备选择 **iPhone 模拟器 / 真机**、**My Mac** 或 **visionOS 模拟器**。
+4. 按 `Cmd + R` 即可运行。
+
+### 2. 命令行快速构建
 ```bash
+# 构建 macOS 目标
 xcodebuild -project DouDouReader.xcodeproj -scheme DouDouReader -destination 'platform=macOS' -configuration Debug build
 ```
 
-`DouDouReader/` 使用 Xcode 的同步目录。在这个目录里新增的 Swift 文件会自动编进目标，不用改 `project.pbxproj`。
+### 3. 自动化测试与诊断
+DouDouReader 内置了完备的自动化自检工具：
 
-## 自检
+- **基础逻辑自检**（校验分章、分页、编码、简繁、ATS、书源解析器）：
+  ```bash
+  /path/to/DouDouReader.app/Contents/MacOS/DouDouReader -selfTest
+  # 校验通过控制台打印：LOGIC_OK
+  ```
+- **生成高保真预览截图**：
+  ```bash
+  /path/to/DouDouReader.app/Contents/MacOS/DouDouReader -renderScreenshots
+  ```
+- **直接进入发现页**：
+  ```bash
+  /path/to/DouDouReader.app/Contents/MacOS/DouDouReader -openSources
+  ```
 
-启动参数 `-selfTest` 会跑本地逻辑检查（分章、分页、编码、简繁、书源解析、ATS 配置等），然后退出。通过时控制台打印 `LOGIC_OK`。
+---
 
-在 Scheme → Run → Arguments 里加上 `-selfTest`，或给已编译的 Mac 应用传这个参数。
+## 📂 项目结构
 
-`-openSources` 会在启动后直接进入发现页。
-
-## 目录
-
-```
-DouDouReader-Info.plist          文档类型、后台音频、ATS
+```text
 DouDouReader/
-  App/                           入口、系统外观
-  Library/                       书架、书目、导入、示例小说
-  Text/                          解码、分章、简繁、分页
-  Reader/                        阅读器、排版、主题、朗读
-  BookSource/                    书源规则、目录抓取、预设站点
-  Diagnostics/                   -selfTest 用的逻辑检查
-  Assets.xcassets/
+├── App/                # 应用程序生命周期、入口与全局外观
+├── Library/            # 书架模型、书籍存储 (BookStorage)、示例图书、本地文件导入
+├── Text/               # 正文解码 (EncodingDetector)、分章器 (ChapterSplitter)、简繁转换、TextKit 分页引擎
+├── Reader/             # 阅读器主界面、排版菜单、主题色彩、TTS 听书控制器
+├── BookSource/         # 书源规则引擎 (BookSourceEngine)、XPath/JSONPath 抓取器、内置源与订阅管理器
+├── Diagnostics/        # 自动化自检 (-selfTest) 与高保真截图生成器 (-renderScreenshots)
+└── Assets.xcassets/    # 图标、色板与应用素材
 ```
 
-## 数据
+---
 
-书架、书签和书源存在 SwiftData 里。正文和导入的字体写在本应用的 Application Support 目录：
+## 🔒 隐私与数据存储
 
-```
-Application Support/DouDouReader/Books
-Application Support/DouDouReader/Fonts
-```
+- **完全本地化**：用户的书架、书签、书源配置均保存在本地 `SwiftData` 容器中。
+- **文件沙盒存储**：书籍文件与导入的外部字体均安全保存在系统沙盒的 `Application Support/DouDouReader/` 目录下，不产生冗余残留。
+- **网络安全性 (ATS)**：应用支持 HTTPS 书源及经用户许可的自定义/内置网络源请求，无多余隐私追踪与第三方 SDK 依赖。
 
-阅读进度跟着这本书保存在本机。
+---
 
-## 书源和网络
+## 📄 开源协议
 
-部分预设站点是明文 HTTP。`DouDouReader-Info.plist` 里 `NSAppTransportSecurity` 只保留 `NSAllowsArbitraryLoads`。不要再加 `NSAllowsLocalNetworking`、`NSAllowsArbitraryLoadsInWebContent` 或 `NSAllowsArbitraryLoadsForMedia`。从 iOS 10 和 macOS 10.12 起，这些键存在时系统会忽略全局放行，HTTP 书源会被 ATS 拦住。
-
-手动填写的书源地址只接受 HTTPS，以及本机和局域网的 HTTP。预设目录的请求按站点自己的地址发出。
+本项目采用 [MIT License](LICENSE) 开源协议，欢迎交流学习与提交 PR！

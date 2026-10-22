@@ -19,6 +19,9 @@ struct MyApp: App {
             fatalError("无法打开书架数据库：\(error)")
         }
         LogicChecks.exitIfRequested()
+        #if os(macOS)
+        ScreenshotExporter.exportIfRequested(container: container)
+        #endif
     }
 
     var body: some Scene {
