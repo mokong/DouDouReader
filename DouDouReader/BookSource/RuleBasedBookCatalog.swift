@@ -592,12 +592,16 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         return URL(string: text)
     }
 
+    private static let shubaRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"(?:/book/|/txt/)(\d+)"#)
+    }()
+
     /// /book/123.htm、/txt/123.htm、/txt/123/456 的目录都在 /book/123/。
     private func shubaCatalogURLs(from url: URL) -> [URL] {
         let host = (url.host ?? "").lowercased()
         let sourceHost = (URL(string: source.sourceURL)?.host ?? "").lowercased()
         guard host.contains("69shu") || sourceHost.contains("69shu") else { return [] }
-        guard let regex = try? NSRegularExpression(pattern: #"(?:/book/|/txt/)(\d+)"#) else { return [] }
+        guard let regex = Self.shubaRegex else { return [] }
         let path = url.path
         let range = NSRange(path.startIndex..., in: path)
         guard let match = regex.firstMatch(in: path, range: range),

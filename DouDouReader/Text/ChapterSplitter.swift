@@ -34,11 +34,19 @@ nonisolated enum ChapterSplitter {
         let ns = text as NSString
         var location = 0
         var marks: [(title: String, lineStart: Int, bodyStart: Int)] = []
+        let forcedChar = forcedHeadingPrefix.utf16.first!
+
         while location < ns.length {
             let lineRange = ns.lineRange(for: NSRange(location: location, length: 0))
-            let trimmed = ns.substring(with: lineRange).trimmingCharacters(in: .whitespacesAndNewlines)
-            if isHeading(trimmed) {
-                marks.append((displayTitle(trimmed), lineRange.location, NSMaxRange(lineRange)))
+            let len = lineRange.length
+            if len > 0 {
+                let firstChar = ns.character(at: lineRange.location)
+                if firstChar == forcedChar || len <= 120 {
+                    let trimmed = ns.substring(with: lineRange).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if isHeading(trimmed) {
+                        marks.append((displayTitle(trimmed), lineRange.location, NSMaxRange(lineRange)))
+                    }
+                }
             }
             let next = NSMaxRange(lineRange)
             if next <= location { break }

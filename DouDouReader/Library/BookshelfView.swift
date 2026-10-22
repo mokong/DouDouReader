@@ -837,11 +837,10 @@ struct CacheManageSheet: View {
     @Query private var books: [BookRecord]
     @State private var sizes: [UUID: Int64] = [:]
     @State private var totalSize: Int64 = 0
+    @State private var cachedBookIDs: Set<UUID> = []
 
     private var cachedBooks: [BookRecord] {
-        books
-            .filter { !$0.remoteBookID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .filter { StoredChapters.hasCache(fileName: $0.fileName) }
+        books.filter { cachedBookIDs.contains($0.id) }
     }
 
     var body: some View {
@@ -888,18 +887,25 @@ struct CacheManageSheet: View {
     }
 
     private func reload() {
-        let snapshot = books.map { ($0.id, $0.fileName) }
+        let snapshot = books
+            .filter { !$0.remoteBookID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { ($0.id, $0.fileName) }
         Task.detached(priority: .utility) {
             var map: [UUID: Int64] = [:]
             var total: Int64 = 0
+            var cached = Set<UUID>()
             for (id, fileName) in snapshot {
-                let size = StoredChapters.cacheSize(fileName: fileName)
-                map[id] = size
-                total += size
+                if StoredChapters.hasCache(fileName: fileName) {
+                    cached.insert(id)
+                    let size = StoredChapters.cacheSize(fileName: fileName)
+                    map[id] = size
+                    total += size
+                }
             }
             await MainActor.run {
                 sizes = map
                 totalSize = total
+                cachedBookIDs = cached
             }
         }
     }

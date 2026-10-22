@@ -235,13 +235,23 @@ nonisolated struct ZipArchive: Sendable {
 }
 
 private nonisolated enum CRC32 {
+    private static let table: [UInt32] = {
+        (0..<256).map { i -> UInt32 in
+            var c = UInt32(i)
+            for _ in 0..<8 {
+                c = (c & 1 != 0) ? (0xEDB8_8320 ^ (c >> 1)) : (c >> 1)
+            }
+            return c
+        }
+    }()
+
     static func hash(_ data: Data) -> UInt32 {
         var crc: UInt32 = 0xFFFF_FFFF
-        for byte in data {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 {
-                let mask: UInt32 = (crc & 1) == 1 ? 0xEDB8_8320 : 0
-                crc = (crc >> 1) ^ mask
+        data.withUnsafeBytes { buffer in
+            guard let ptr = buffer.bindMemory(to: UInt8.self).baseAddress else { return }
+            for i in 0..<buffer.count {
+                let index = Int((crc ^ UInt32(ptr[i])) & 0xFF)
+                crc = (crc >> 8) ^ table[index]
             }
         }
         return ~crc
@@ -398,6 +408,19 @@ private nonisolated struct BitReader {
     }
 
     mutating func bits(_ count: Int) -> Int? {
+        guard count > 0 else { return 0 }
+        let available = 8 - bitPosition
+        if count <= available {
+            guard index < bytes.count else { return nil }
+            let mask = (1 << count) - 1
+            let value = (Int(bytes[index]) >> bitPosition) & mask
+            bitPosition += count
+            if bitPosition == 8 {
+                bitPosition = 0
+                index += 1
+            }
+            return value
+        }
         var value = 0
         for shift in 0..<count {
             guard let bit = bit() else { return nil }

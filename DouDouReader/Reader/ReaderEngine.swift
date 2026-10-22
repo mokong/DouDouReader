@@ -44,7 +44,7 @@ final class ReaderEngine {
     @ObservationIgnored private(set) var anchorOffset: Int
     @ObservationIgnored private(set) var pageSize: CGSize = .zero
     private(set) var layoutRevision = 0
-    private(set) var highlightRange: NSRange?
+    @ObservationIgnored private(set) var highlightRange: NSRange?
     private(set) var autoRunning = false
     @ObservationIgnored var animateNextTurn = false
     var showsChrome = false
@@ -659,7 +659,7 @@ final class ReaderEngine {
         return ns.substring(to: 42)
     }
 
-    func search(_ query: String, limit: Int = 80) -> [SearchHit] {
+    nonisolated static func search(source: String, chapters: [ChapterSlice], query: String, limit: Int = 80) -> [SearchHit] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return [] }
         let ns = source as NSString
@@ -672,7 +672,7 @@ final class ReaderEngine {
                 range: NSRange(location: location, length: ns.length - location)
             )
             if found.location == NSNotFound { break }
-            let chapter = chapterIndex(at: found.location)
+            let chapter = chapterIndex(in: chapters, at: found.location)
             let start = max(0, found.location - 14)
             let end = min(ns.length, NSMaxRange(found) + 22)
             let snippet = ns.substring(with: NSRange(location: start, length: end - start))
@@ -692,16 +692,29 @@ final class ReaderEngine {
         return hits
     }
 
-    func chapterIndex(at offset: Int) -> Int {
+    func search(_ query: String, limit: Int = 80) -> [SearchHit] {
+        Self.search(source: source, chapters: chapters, query: query, limit: limit)
+    }
+
+    nonisolated static func chapterIndex(in chapters: [ChapterSlice], at offset: Int) -> Int {
+        guard !chapters.isEmpty else { return 0 }
+        var low = 0
+        var high = chapters.count - 1
         var result = 0
-        for chapter in chapters {
-            if chapter.lineStart <= offset {
-                result = chapter.index
+        while low <= high {
+            let mid = (low + high) / 2
+            if chapters[mid].lineStart <= offset {
+                result = chapters[mid].index
+                low = mid + 1
             } else {
-                break
+                high = mid - 1
             }
         }
         return result
+    }
+
+    func chapterIndex(at offset: Int) -> Int {
+        Self.chapterIndex(in: chapters, at: offset)
     }
 
     func positionFor(offset: Int) -> ReaderPosition {

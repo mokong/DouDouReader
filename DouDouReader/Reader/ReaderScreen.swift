@@ -906,16 +906,29 @@ struct ReaderScreen: View {
                         group.cancelAll()
                         self.cacheRunning = false
                         self.cacheStatus = "有章节下载失败，已停止"
+                        self.book.loadedChapterCount = engine.chapters.count
+                        self.book.totalUTF16 = engine.totalUTF16
+                        self.book.contentHash = BookLibrary.hash(engine.source)
+                        try? self.modelContext.save()
                         return
                     }
                     done += 1
                     self.cacheFraction = total > 0 ? Double(done) / Double(total) : 0
                     self.cacheStatus = "已缓存 \(done) / \(total) 章"
+                    if done % 20 == 0 {
+                        self.book.loadedChapterCount = engine.chapters.count
+                        self.book.totalUTF16 = engine.totalUTF16
+                        try? self.modelContext.save()
+                    }
                 }
             }
             guard generation == self.cacheGeneration else { return }
             self.cacheRunning = false
             self.cacheStatus = self.cacheFraction >= 1 ? "全本缓存完成" : "缓存已停止"
+            self.book.loadedChapterCount = engine.chapters.count
+            self.book.totalUTF16 = engine.totalUTF16
+            self.book.contentHash = BookLibrary.hash(engine.source)
+            try? self.modelContext.save()
         }
     }
 
@@ -927,6 +940,12 @@ struct ReaderScreen: View {
         cacheRunning = false
         if wasRunning {
             cacheStatus = "缓存中断"
+            if let engine {
+                book.loadedChapterCount = engine.chapters.count
+                book.totalUTF16 = engine.totalUTF16
+                book.contentHash = BookLibrary.hash(engine.source)
+                try? modelContext.save()
+            }
         }
     }
 
@@ -990,22 +1009,6 @@ struct ReaderScreen: View {
         guard !Task.isCancelled, engine == nil else { return }
         showOpeningSpinner = false
         guard let prepared else {
-            loadError = "这本书的文件打不开"
-            return
-        }
-        install(prepared)
-    }
-
-    private func openBook() {
-        guard engine == nil else { return }
-        let snapshot = BookOpenSnapshot(
-            fileName: book.fileName,
-            title: book.title,
-            utf16Offset: book.utf16Offset,
-            chapterIndex: book.chapterIndex,
-            remoteChapterList: book.remoteChapterList
-        )
-        guard let prepared = BookOpenPreparation.make(snapshot) else {
             loadError = "这本书的文件打不开"
             return
         }
@@ -1276,8 +1279,10 @@ struct ReaderScreen: View {
             try StoredChapters.upsert(fileName: book.fileName, index: index, title: normalizedTitle, body: body)
             book.loadedChapterCount = engine.chapters.count
             book.totalUTF16 = engine.totalUTF16
-            book.contentHash = BookLibrary.hash(engine.source)
-            try? modelContext.save()
+            if !allowConcurrent {
+                book.contentHash = BookLibrary.hash(engine.source)
+                try? modelContext.save()
+            }
             if jumpAfter, generation == nil || generation == catalogGeneration {
                 engine.jumpToRemote(index)
             } else if !jumpAfter {
@@ -1399,7 +1404,7 @@ struct ReaderScreen: View {
                 openingBody: opening.openingBody,
                 context: modelContext
             )
-            reloadReader()
+            await reloadReader()
             guard let engine else {
                 showSourceSwitch = false
                 return nil
@@ -1417,14 +1422,28 @@ struct ReaderScreen: View {
         }
     }
 
-    private func reloadReader() {
+    private func reloadReader() async {
         stopCache()
         engine?.stopActivities()
         engine = nil
         cachedCatalog = nil
         cachedCatalogSourceID = nil
         prefetchedRemoteIndices.removeAll()
-        openBook()
+        let snapshot = BookOpenSnapshot(
+            fileName: book.fileName,
+            title: book.title,
+            utf16Offset: book.utf16Offset,
+            chapterIndex: book.chapterIndex,
+            remoteChapterList: book.remoteChapterList
+        )
+        let prepared = await Task.detached(priority: .userInitiated) {
+            BookOpenPreparation.make(snapshot)
+        }.value
+        guard let prepared else {
+            loadError = "这本书的文件打不开"
+            return
+        }
+        install(prepared)
     }
 
     /// 换源后使用 ChapterMatching 模糊匹配（支持中英数字、括号过滤、核心相似度），保持原来阅读位置
@@ -1618,6 +1637,7 @@ struct MacPageView: View {
     var safeTop: CGFloat
     var safeBottom: CGFloat
     var onSearchSelectedText: (String) -> Void
+    @State private var macHighlight: NSRange?
 
     var body: some View {
         GeometryReader { proxy in
@@ -1641,7 +1661,12 @@ struct MacPageView: View {
             .onTapGesture { location in
                 applyTap(xFraction: location.x / max(proxy.size.width, 1))
             }
-            .onAppear { engine.setPageSize(placement.pageSize) }
+            .onAppear {
+                engine.setPageSize(placement.pageSize)
+                engine.onHighlight = { range in
+                    macHighlight = range
+                }
+            }
             .onChange(of: placement.pageSize) { _, newSize in
                 engine.setPageSize(newSize)
             }
@@ -1707,7 +1732,7 @@ struct MacPageView: View {
     private func attributedPage(_ layout: ChapterLayout, page: Int) -> AttributedString {
         let pageRange = layout.characterRanges[page]
         let mutable = NSMutableAttributedString(attributedString: layout.storage.attributedSubstring(from: pageRange))
-        if let highlight = engine.highlightRange {
+        if let highlight = macHighlight ?? engine.highlightRange {
             let local = NSIntersectionRange(highlight, pageRange)
             if local.length > 0 {
                 mutable.addAttribute(

@@ -65,9 +65,12 @@ nonisolated enum RuleJSEvaluator {
         return input
     }
 
+    private static let returnRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"return\s*['"]([^'"]*)['"]"#)
+    }()
+
     static func extractJSLiteral(_ js: String) -> String? {
-        let returnPattern = #"return\s*['"]([^'"]*)['"]"#
-        if let regex = try? NSRegularExpression(pattern: returnPattern),
+        if let regex = returnRegex,
            let match = regex.firstMatch(in: js, range: NSRange(js.startIndex..., in: js)) {
             let value = (js as NSString).substring(with: match.range(at: 1))
             if !value.isEmpty { return value }
@@ -351,6 +354,10 @@ nonisolated enum HTMLMiniParser {
         return depth
     }
 
+    private static let tagAttributeRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"([a-zA-Z0-9_\-:]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?"#)
+    }()
+
     private static func parseTagAndAttributes(_ raw: String) -> (String, [String: String]) {
         var scanner = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         var tag = ""
@@ -365,8 +372,7 @@ nonisolated enum HTMLMiniParser {
         }
 
         // 解析属性 key="val" 或 key='val' 或 key=val
-        let pattern = #"([a-zA-Z0-9_\-:]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        guard let regex = tagAttributeRegex else {
             return (tag, attrs)
         }
 
@@ -391,6 +397,10 @@ nonisolated enum HTMLMiniParser {
 
     // MARK: - HTML 实体转义
 
+    private static let entityRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"&#(x?[0-9a-fA-F]+);"#)
+    }()
+
     static func decodeHTMLEntities(_ raw: String) -> String {
         var str = raw
         if !str.contains("&") { return str }
@@ -413,8 +423,7 @@ nonisolated enum HTMLMiniParser {
         }
 
         // 匹配 &#1234; 或 &#x1234;
-        let regex = try? NSRegularExpression(pattern: #"&#(x?[0-9a-fA-F]+);"#)
-        if let regex {
+        if let regex = entityRegex {
             let nsStr = str as NSString
             let matches = regex.matches(in: str, range: NSRange(location: 0, length: nsStr.length))
             for match in matches.reversed() {
@@ -918,27 +927,37 @@ nonisolated enum HTMLMiniParser {
         return step
     }
 
+    private static let predicateContainsRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"contains\(\s*@([a-zA-Z0-9_\-]+)\s*,\s*['"]([^'"]*)['"]\s*\)"#)
+    }()
+    private static let predicateStartsWithRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"starts-with\(\s*@([a-zA-Z0-9_\-]+)\s*,\s*['"]([^'"]*)['"]\s*\)"#)
+    }()
+    private static let predicateTextEqualsRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"text\(\)\s*=\s*['"]([^'"]*)['"]"#)
+    }()
+
     /// 解析方括号内的函数谓词内容；不认识时返回 nil（保留给既有属性/索引逻辑）。
     private static func parseFunctionPredicate(_ innerRaw: String) -> StepPredicate? {
         let inner = innerRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         if inner == "last()" || inner == "position()=last()" {
             return StepPredicate(kind: .isLast)
         }
-        func capture(_ pattern: String, _ transform: (String, String) -> StepPredicateKind) -> StepPredicate? {
-            guard let regex = try? NSRegularExpression(pattern: pattern),
+        func capture(_ regex: NSRegularExpression?, _ transform: (String, String) -> StepPredicateKind) -> StepPredicate? {
+            guard let regex,
                   let m = regex.firstMatch(in: inner, range: NSRange(inner.startIndex..., in: inner)),
                   m.numberOfRanges >= 3 else { return nil }
             let attr = (inner as NSString).substring(with: m.range(at: 1))
             let val = (inner as NSString).substring(with: m.range(at: 2))
             return StepPredicate(kind: transform(attr, val))
         }
-        if let p = capture(#"contains\(\s*@([a-zA-Z0-9_\-]+)\s*,\s*['"]([^'"]*)['"]\s*\)"#, { .contains(attr: $0, value: $1) }) {
+        if let p = capture(predicateContainsRegex, { .contains(attr: $0, value: $1) }) {
             return p
         }
-        if let p = capture(#"starts-with\(\s*@([a-zA-Z0-9_\-]+)\s*,\s*['"]([^'"]*)['"]\s*\)"#, { .startsWith(attr: $0, value: $1) }) {
+        if let p = capture(predicateStartsWithRegex, { .startsWith(attr: $0, value: $1) }) {
             return p
         }
-        if let regex = try? NSRegularExpression(pattern: #"text\(\)\s*=\s*['"]([^'"]*)['"]"#),
+        if let regex = predicateTextEqualsRegex,
            let m = regex.firstMatch(in: inner, range: NSRange(inner.startIndex..., in: inner)) {
             let val = (inner as NSString).substring(with: m.range(at: 1))
             return StepPredicate(kind: .textEquals(value: val))

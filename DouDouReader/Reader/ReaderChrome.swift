@@ -287,9 +287,10 @@ struct CatalogSheet: View {
 
     @State private var isAscending = true
     @State private var searchText = ""
+    @State private var allRows: [ReaderCatalog.Row] = []
 
-    private var allRows: [ReaderCatalog.Row] {
-        ReaderCatalog.rows(
+    private func reloadAllRows() {
+        allRows = ReaderCatalog.rows(
             engineTitles: engine.chapters.map(\.title),
             remoteTitles: remoteTitles,
             loadedIndices: loadedIndices
@@ -317,30 +318,34 @@ struct CatalogSheet: View {
     }
 
     var body: some View {
+        let displayed = displayedRows
         NavigationStack {
             ScrollViewReader { proxy in
                 List {
                     Section {
-                        if displayedRows.isEmpty {
+                        if displayed.isEmpty {
                             Text("未找到匹配章节")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .center)
                                 .padding(.vertical, 24)
                         } else {
-                            catalogRows
+                            catalogRows(displayed)
                         }
                     } header: {
-                        catalogHeader
+                        catalogHeader(displayedCount: displayed.count)
                     }
                 }
                 .searchable(text: $searchText, prompt: "搜索章节名")
                 .onAppear {
+                    reloadAllRows()
                     let current = currentMarker ?? 0
                     DispatchQueue.main.async {
                         proxy.scrollTo(current, anchor: .center)
                     }
                 }
+                .onChange(of: loadedIndices) { _, _ in reloadAllRows() }
+                .onChange(of: engine.chapters.count) { _, _ in reloadAllRows() }
                 .toolbar {
                     #if os(iOS) || os(visionOS)
                     ToolbarItem(placement: .topBarLeading) {
@@ -397,10 +402,10 @@ struct CatalogSheet: View {
         }
     }
 
-    private var catalogHeader: some View {
+    private func catalogHeader(displayedCount: Int) -> some View {
         HStack {
             if !searchText.isEmpty {
-                Text("匹配 \(displayedRows.count) 章（共 \(allRows.count) 章）")
+                Text("匹配 \(displayedCount) 章（共 \(allRows.count) 章）")
             } else if !remoteTitles.isEmpty {
                 Text("共 \(allRows.count) 章 · 已缓存 \(loadedIndices.count) 章 · \(isAscending ? "正序" : "倒序")")
             } else {
@@ -411,8 +416,8 @@ struct CatalogSheet: View {
         .font(.caption)
     }
 
-    private var catalogRows: some View {
-        ForEach(displayedRows) { row in
+    private func catalogRows(_ rows: [ReaderCatalog.Row]) -> some View {
+        ForEach(rows) { row in
             Button {
                 onJump(row.index)
             } label: {
@@ -475,6 +480,8 @@ struct SearchSheet: View {
     var onPick: (Int) -> Void
     var initialQuery: String = ""
     @State private var query: String
+    @State private var results: [SearchHit] = []
+    @State private var searchTask: Task<Void, Never>?
 
     init(engine: ReaderEngine, initialQuery: String = "", onPick: @escaping (Int) -> Void) {
         self.engine = engine
@@ -485,7 +492,7 @@ struct SearchSheet: View {
 
     var body: some View {
         NavigationStack {
-            List(engine.search(query)) { hit in
+            List(results) { hit in
                 Button {
                     onPick(hit.offset)
                 } label: {
@@ -503,6 +510,9 @@ struct SearchSheet: View {
                 if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("输入想找的句子")
                         .foregroundStyle(.secondary)
+                } else if results.isEmpty {
+                    Text("未找到匹配内容")
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("搜索")
@@ -510,6 +520,37 @@ struct SearchSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .searchable(text: $query, prompt: "在本书中查找")
+            .onAppear {
+                performSearch(query, debounce: false)
+            }
+            .onChange(of: query) { _, newQuery in
+                performSearch(newQuery, debounce: true)
+            }
+            .onDisappear {
+                searchTask?.cancel()
+            }
+        }
+    }
+
+    private func performSearch(_ text: String, debounce: Bool) {
+        searchTask?.cancel()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            results = []
+            return
+        }
+        let sourceSnapshot = engine.source
+        let chaptersSnapshot = engine.chapters
+        searchTask = Task {
+            if debounce {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            let hits = await Task.detached(priority: .userInitiated) {
+                ReaderEngine.search(source: sourceSnapshot, chapters: chaptersSnapshot, query: trimmed)
+            }.value
+            guard !Task.isCancelled else { return }
+            results = hits
         }
     }
 }
