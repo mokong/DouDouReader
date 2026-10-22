@@ -439,7 +439,7 @@ struct ReaderScreen: View {
                 .monospacedDigit()
                 .foregroundStyle(theme.secondary.color)
                 .padding(.horizontal, placement.textRect.minX)
-                .padding(.bottom, safeBottom + 6)
+                .padding(.bottom, safeBottom + 8)
             }
         }
     }
@@ -1602,6 +1602,7 @@ final class SelectablePageTextView: NSTextView {
 
 struct SelectablePageView: NSViewRepresentable {
     var attributed: NSAttributedString
+    var layoutDelegate: ChapterLayoutManagerDelegate?
     var onTapXFraction: (CGFloat) -> Void
     var onSearchText: (String) -> Void
 
@@ -1611,15 +1612,29 @@ struct SelectablePageView: NSViewRepresentable {
         textView.isEditable = false
         textView.drawsBackground = false
         textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = true
         textView.isHorizontallyResizable = false
-        textView.isVerticallyResizable = true
+        textView.isVerticallyResizable = false
+        textView.clipsToBounds = true
         textView.autoresizingMask = [.width, .height]
         textView.onSearchText = onSearchText
+        if let layoutDelegate {
+            textView.layoutManager?.delegate = layoutDelegate
+        }
         return textView
     }
 
     func updateNSView(_ nsView: SelectablePageTextView, context: Context) {
+        if nsView.textContainer?.lineFragmentPadding != 0 {
+            nsView.textContainer?.lineFragmentPadding = 0
+        }
+        if nsView.isVerticallyResizable {
+            nsView.isVerticallyResizable = false
+        }
+        if let layoutDelegate, nsView.layoutManager?.delegate !== layoutDelegate {
+            nsView.layoutManager?.delegate = layoutDelegate
+        }
         if !(nsView.attributedString().isEqual(to: attributed)) {
             nsView.textStorage?.setAttributedString(attributed)
         }
@@ -1655,6 +1670,7 @@ struct MacPageView: View {
                 Color.clear
                 page(engine)
                     .frame(width: placement.pageSize.width, height: placement.pageSize.height, alignment: .topLeading)
+                    .clipped()
                     .position(x: placement.textRect.midX, y: placement.textRect.midY)
             }
             .contentShape(Rectangle())
@@ -1719,6 +1735,7 @@ struct MacPageView: View {
                   layout.characterRanges.indices.contains(engine.position.pageIndex) {
             SelectablePageView(
                 attributed: NSAttributedString(attributedPage(layout, page: engine.position.pageIndex)),
+                layoutDelegate: layout.delegate,
                 onTapXFraction: { xf in
                     applyTap(xFraction: xf)
                 },
@@ -1731,15 +1748,22 @@ struct MacPageView: View {
 
     private func attributedPage(_ layout: ChapterLayout, page: Int) -> AttributedString {
         let pageRange = layout.characterRanges[page]
-        let mutable = NSMutableAttributedString(attributedString: layout.storage.attributedSubstring(from: pageRange))
+        var sub = layout.storage.attributedSubstring(from: pageRange)
+        if sub.string.hasSuffix("\n") && sub.length > 0 {
+            sub = sub.attributedSubstring(from: NSRange(location: 0, length: sub.length - 1))
+        }
+        let mutable = NSMutableAttributedString(attributedString: sub)
         if let highlight = macHighlight ?? engine.highlightRange {
             let local = NSIntersectionRange(highlight, pageRange)
             if local.length > 0 {
-                mutable.addAttribute(
-                    .backgroundColor,
-                    value: NSColor.systemYellow.withAlphaComponent(0.45),
-                    range: NSRange(location: local.location - pageRange.location, length: local.length)
-                )
+                let targetLen = min(local.length, mutable.length - (local.location - pageRange.location))
+                if targetLen > 0 {
+                    mutable.addAttribute(
+                        .backgroundColor,
+                        value: NSColor.systemYellow.withAlphaComponent(0.45),
+                        range: NSRange(location: local.location - pageRange.location, length: targetLen)
+                    )
+                }
             }
         }
         return AttributedString(mutable)

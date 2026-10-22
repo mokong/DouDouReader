@@ -5,6 +5,34 @@ import UIKit
 import AppKit
 #endif
 
+final class ChapterLayoutManagerDelegate: NSObject, NSLayoutManagerDelegate {
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        lineSpacingAfterGlyphAt glyphIndex: Int,
+        withProposedLineFragmentRect rect: CGRect
+    ) -> CGFloat {
+        let charIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        guard let storage = layoutManager.textStorage, charIndex < storage.length else {
+            return 0
+        }
+        let style = storage.attribute(.paragraphStyle, at: charIndex, effectiveRange: nil) as? NSParagraphStyle
+        return style?.lineSpacing ?? 0
+    }
+
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        paragraphSpacingAfterGlyphAt glyphIndex: Int,
+        withProposedLineFragmentRect rect: CGRect
+    ) -> CGFloat {
+        let charIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        guard let storage = layoutManager.textStorage, charIndex < storage.length else {
+            return 0
+        }
+        let style = storage.attribute(.paragraphStyle, at: charIndex, effectiveRange: nil) as? NSParagraphStyle
+        return style?.paragraphSpacing ?? 0
+    }
+}
+
 enum TextPaginator {
     /// Fills one text container per page so each range is exactly what that page draws.
     static func ranges(for text: NSAttributedString, pageSize: CGSize) -> [NSRange] {
@@ -16,6 +44,8 @@ enum TextPaginator {
         let storage = NSTextStorage(attributedString: text)
         let layout = NSLayoutManager()
         layout.allowsNonContiguousLayout = false
+        let delegate = ChapterLayoutManagerDelegate()
+        layout.delegate = delegate
         storage.addLayoutManager(layout)
 
         var result: [NSRange] = []
@@ -45,6 +75,7 @@ enum TextPaginator {
         if let last = result.last, NSMaxRange(last) < length {
             result.append(NSRange(location: NSMaxRange(last), length: length - NSMaxRange(last)))
         }
+        _ = delegate
         return result
     }
 }
@@ -52,6 +83,7 @@ enum TextPaginator {
 final class ChapterLayout {
     let storage: NSTextStorage
     let layoutManager: NSLayoutManager
+    let delegate: ChapterLayoutManagerDelegate
     let containers: [NSTextContainer]
     let characterRanges: [NSRange]
     let titlePrefix: Int
@@ -61,6 +93,7 @@ final class ChapterLayout {
     init(
         storage: NSTextStorage,
         layoutManager: NSLayoutManager,
+        delegate: ChapterLayoutManagerDelegate,
         containers: [NSTextContainer],
         characterRanges: [NSRange],
         titlePrefix: Int,
@@ -69,6 +102,7 @@ final class ChapterLayout {
     ) {
         self.storage = storage
         self.layoutManager = layoutManager
+        self.delegate = delegate
         self.containers = containers
         self.characterRanges = characterRanges
         self.titlePrefix = titlePrefix
@@ -109,6 +143,8 @@ enum ChapterLayouter {
         let storage = NSTextStorage(attributedString: built.text)
         let layoutManager = NSLayoutManager()
         layoutManager.allowsNonContiguousLayout = false
+        let delegate = ChapterLayoutManagerDelegate()
+        layoutManager.delegate = delegate
         storage.addLayoutManager(layoutManager)
         var containers: [NSTextContainer] = []
         var ranges: [NSRange] = []
@@ -145,6 +181,7 @@ enum ChapterLayouter {
         return ChapterLayout(
             storage: storage,
             layoutManager: layoutManager,
+            delegate: delegate,
             containers: containers,
             characterRanges: ranges,
             titlePrefix: built.titlePrefix,

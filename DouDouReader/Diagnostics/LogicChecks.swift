@@ -55,6 +55,7 @@ enum LogicChecks {
         checkSpeechEntry(&errors)
         checkSpeechRateMenu(&errors)
         checkTypography(&errors)
+        checkLineSpacingConsistency(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -532,6 +533,53 @@ enum LogicChecks {
         let filtered = ChapterTextBuilder.plainParagraphs("甲\n这是广告句\n乙", blockWords: "广告")
         if filtered != "甲\n乙" {
             errors.append("屏蔽词没有去掉整段：\(filtered)")
+        }
+    }
+
+    private static func checkLineSpacingConsistency(_ errors: inout [String]) {
+        let snapshot = LayoutSnapshot(
+            fontName: "",
+            fontSize: 20,
+            lineSpacing: 8,
+            paragraphSpacing: 14,
+            indentChars: 2,
+            kern: 0,
+            alignment: 0,
+            script: 0,
+            themeID: "paper",
+            blockWords: "",
+            interfaceDark: false
+        )
+        let theme = ReadingThemes.paper
+        for h in stride(from: 500, through: 650, by: 15) {
+            let layout = ChapterLayouter.layout(
+                title: "第一章 雨夜的信封",
+                body: SampleNovel.text,
+                sourceBodyUTF16: SampleNovel.text.utf16.count,
+                snapshot: snapshot,
+                theme: theme,
+                pageSize: CGSize(width: 375, height: CGFloat(h))
+            )
+            for pageIdx in 0..<min(layout.containers.count, 5) {
+                let container = layout.containers[pageIdx]
+                let glyphRange = layout.layoutManager.glyphRange(for: container)
+                var gi = glyphRange.location
+                var lineRects: [CGRect] = []
+                while gi < NSMaxRange(glyphRange) {
+                    var range = NSRange()
+                    let rect = layout.layoutManager.lineFragmentRect(forGlyphAt: gi, effectiveRange: &range)
+                    lineRects.append(rect)
+                    gi = NSMaxRange(range)
+                }
+                if lineRects.count >= 2 {
+                    let last = lineRects[lineRects.count - 1]
+                    let secondLast = lineRects[lineRects.count - 2]
+                    let gap = last.minY - secondLast.minY
+                    if gap < 27.5 {
+                        errors.append("排版行间距异常压缩：高度 \(h) 第 \(pageIdx) 页倒数第二行与倒数第一行间距为 \(gap)，未保留行间距")
+                    }
+                }
+            }
         }
     }
 

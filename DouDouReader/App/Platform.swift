@@ -54,7 +54,7 @@ enum PageMetrics {
     static let headerHeight: CGFloat = 28
     static let footerHeight: CGFloat = 22
     static let headerGap: CGFloat = 8
-    static let footerGap: CGFloat = 8
+    static let footerGap: CGFloat = 14
 
     static func textSize(
         bounds: CGSize,
