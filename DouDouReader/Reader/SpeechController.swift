@@ -175,9 +175,10 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     #endif
 
     /// 中断开始：仅在朗读活跃时自动暂停合成器并同步 isPaused，随后触发 UI 回调弹窗。
+    /// 用户已手动暂停期间（isPaused == true）直接忽略，避免被短暂音频抢占（如通知声）重复打扰。
     @MainActor
     private func handleInterruptionBegan() {
-        guard isActive else { return }
+        guard isActive, !isPaused else { return }
         if synthesizer.isSpeaking, !synthesizer.isPaused {
             synthesizer.pauseSpeaking(at: .word)
         }
@@ -185,10 +186,15 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         onInterruptionBegan?()
     }
 
-    /// 中断结束：一律不自动恢复朗读（即使 options 含 shouldResume）。
-    /// 保持暂停状态，由用户在弹窗里选「继续朗读」或「退出朗读」，避免被其他音频再次抢占。
+    /// 中断结束：只重新激活音频会话（.began 时系统会 deactivate 本 App 的会话，
+    /// 不重新激活则「继续朗读」时 continueSpeaking 会无声）；
+    /// 不自动恢复发声：synthesizer 保持暂停，由用户在弹窗里选「继续朗读」或「退出朗读」。
     @MainActor
-    private func handleInterruptionEnded() {}
+    private func handleInterruptionEnded() {
+        guard isActive else { return }
+        // 用户已在弹窗选「退出朗读」时 isActive 为 false，无需重新激活。
+        prepareAudio()
+    }
 
     private func expired() -> Bool {
         if let deadline, Date() >= deadline {
