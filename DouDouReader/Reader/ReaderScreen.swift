@@ -149,6 +149,8 @@ struct ReaderScreen: View {
     @State private var brightnessGestureActive = false
     @State private var startBrightness: Double = 1.0
     @State private var brightnessHUDTask: Task<Void, Never>?
+    /// 朗读被音频会话中断（来电/其他 App 抢占）后弹出的确认窗：继续朗读 / 退出朗读。
+    @State private var showSpeechInterruptionAlert = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var currentSourceName: String? {
@@ -260,6 +262,10 @@ struct ReaderScreen: View {
         .preferredColorScheme(theme.isDark ? .dark : .light)
         .onAppear {
             sync(engine)
+            // 中断开始时由 SpeechController 自动暂停并回调这里，仅朗读活跃时触发。
+            engine.speech.onInterruptionBegan = {
+                showSpeechInterruptionAlert = true
+            }
             prefetchNextChapterIfNeeded(engine: engine)
         }
         .onChange(of: settings.revision) { _, _ in sync(engine) }
@@ -366,6 +372,16 @@ struct ReaderScreen: View {
             .presentationDetents([.fraction(0.68), .large])
             .presentationDragIndicator(.visible)
             #endif
+        }
+        .alert("朗读被中断，是否退出朗读？", isPresented: $showSpeechInterruptionAlert) {
+            Button("继续朗读") {
+                engine.speech.togglePause()
+            }
+            Button("退出朗读", role: .destructive) {
+                engine.toggleSpeech()
+            }
+        } message: {
+            Text("通话或其他音频中断了朗读。继续将从暂停处恢复，退出则结束本次朗读。")
         }
         #if os(iOS)
         .onAppear { updateIdleTimer() }

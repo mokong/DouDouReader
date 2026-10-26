@@ -18,6 +18,14 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     var isPaused = false
     var onRange: ((NSRange) -> Void)?
     var onAdvance: ((Advance) -> Void)?
+    /// 朗读被系统音频中断（来电、其他 App 抢占）开始时的 UI 回调，主线程派发，仅在朗读活跃时触发。
+    /// ReaderScreen 据此弹「朗读被中断」确认窗；默认 nil，由 UI 层注入。
+    var onInterruptionBegan: (@MainActor () -> Void)?
+
+    #if os(iOS) || os(visionOS)
+    /// 音频会话中断通知的观察者令牌；register/unregister 成对出现，deinit 兜底注销。
+    private var interruptionObserver: NSObjectProtocol?
+    #endif
 
     enum Advance {
         case none
@@ -28,6 +36,15 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     override init() {
         super.init()
         synthesizer.delegate = self
+        #if os(iOS) || os(visionOS)
+        registerInterruptionObserver()
+        #endif
+    }
+
+    deinit {
+        #if os(iOS) || os(visionOS)
+        unregisterInterruptionObserver()
+        #endif
     }
 
     func start(parts: [String], mode: SpeechReadMode, rate: Float, voiceID: String, sleepMinutes: Int, highlight: Bool) {
@@ -116,6 +133,67 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         try? session.setCategory(.playback, mode: .spokenAudio)
         try? session.setActive(true)
         #endif
+    }
+
+    #if os(iOS) || os(visionOS)
+    /// 注册音频会话中断通知观察者（init 时调用）。单独成方法，便于手动重新注册与单测。
+    private func registerInterruptionObserver() {
+        guard interruptionObserver == nil else { return }
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] note in
+            self?.handleInterruptionNotification(note)
+        }
+    }
+
+    /// 注销中断通知观察者（deinit 兜底，与 register 成对）。
+    private func unregisterInterruptionObserver() {
+        if let observer = interruptionObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        interruptionObserver = nil
+    }
+
+    /// 解析中断通知类型，切到主 actor 后分派给 began/ended 处理。
+    /// 通知回调可能在非主线程到达，与合成器 delegate 一样统一收口到主线程再改 UI 状态。
+    nonisolated private func handleInterruptionNotification(_ note: Notification) {
+        guard let typeValue = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+        Task { @MainActor in
+            switch type {
+            case .began:
+                self.handleInterruptionBegan()
+            case .ended:
+                self.handleInterruptionEnded()
+            @unknown default:
+                break
+            }
+        }
+    }
+    #endif
+
+    /// 中断开始：仅在朗读活跃时自动暂停合成器并同步 isPaused，随后触发 UI 回调弹窗。
+    /// 用户已手动暂停期间（isPaused == true）直接忽略，避免被短暂音频抢占（如通知声）重复打扰。
+    @MainActor
+    private func handleInterruptionBegan() {
+        guard isActive, !isPaused else { return }
+        if synthesizer.isSpeaking, !synthesizer.isPaused {
+            synthesizer.pauseSpeaking(at: .word)
+        }
+        isPaused = true
+        onInterruptionBegan?()
+    }
+
+    /// 中断结束：只重新激活音频会话（.began 时系统会 deactivate 本 App 的会话，
+    /// 不重新激活则「继续朗读」时 continueSpeaking 会无声）；
+    /// 不自动恢复发声：synthesizer 保持暂停，由用户在弹窗里选「继续朗读」或「退出朗读」。
+    @MainActor
+    private func handleInterruptionEnded() {
+        guard isActive else { return }
+        // 用户已在弹窗选「退出朗读」时 isActive 为 false，无需重新激活。
+        prepareAudio()
     }
 
     private func expired() -> Bool {
