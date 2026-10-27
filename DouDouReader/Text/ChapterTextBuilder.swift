@@ -5,7 +5,7 @@ import UIKit
 import AppKit
 #endif
 
-enum ChapterTextBuilder {
+nonisolated enum ChapterTextBuilder {
     static func make(
         title: String,
         body: String,

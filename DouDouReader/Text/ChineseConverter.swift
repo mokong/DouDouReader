@@ -1,6 +1,6 @@
 import Foundation
 
-enum ChineseConverter {
+nonisolated enum ChineseConverter {
     static func convert(_ text: String, to script: ChineseScript) -> String {
         switch script {
         case .original:

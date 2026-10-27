@@ -19,7 +19,7 @@ enum PageTurnMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum ChineseScript: Int, Codable, CaseIterable, Identifiable {
+nonisolated enum ChineseScript: Int, Codable, CaseIterable, Identifiable {
     case original = 0
     case simplified = 1
     case traditional = 2
@@ -35,7 +35,7 @@ enum ChineseScript: Int, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum TextAlignmentChoice: Int, Codable, CaseIterable, Identifiable {
+nonisolated enum TextAlignmentChoice: Int, Codable, CaseIterable, Identifiable {
     case left = 0
     case center = 1
     case right = 2
@@ -80,7 +80,7 @@ enum SpeechReadMode: Int, Codable, CaseIterable, Identifiable {
     }
 }
 
-struct LayoutSnapshot: Equatable, Hashable {
+nonisolated struct LayoutSnapshot: Equatable, Hashable, Sendable {
     var fontName: String
     var fontSize: Double
     var lineSpacing: Double

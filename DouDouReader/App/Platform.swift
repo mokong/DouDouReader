@@ -16,7 +16,7 @@ struct RGBA: Equatable, Sendable {
     var b: Double
     var a: Double
 
-    var platform: AppColor {
+    nonisolated var platform: AppColor {
         #if os(iOS) || os(visionOS)
         AppColor(red: r, green: g, blue: b, alpha: a)
         #else
@@ -25,7 +25,7 @@ struct RGBA: Equatable, Sendable {
     }
 }
 
-enum PlatformFont {
+nonisolated enum PlatformFont {
     static func make(name: String, size: CGFloat, bold: Bool = false) -> AppFont {
         let base: AppFont
         if name.isEmpty {

@@ -216,7 +216,8 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
 
     private func makePage(_ position: ReaderPosition) -> PageContentController {
         let terminal = engine.isTerminal(position)
-        let laid = terminal ? nil : engine.layout(for: position.chapterIndex)
+        // 按页取排版：首屏分页可能还没排到这一页，续排也比画空白页好。
+        let laid = terminal ? nil : engine.layout(forChapter: position.chapterIndex, coveringPage: position.pageIndex)
         let page = PageContentController(
             position: position,
             chapterLayout: laid,

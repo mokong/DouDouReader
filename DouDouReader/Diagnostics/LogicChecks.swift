@@ -28,6 +28,7 @@ enum LogicChecks {
         var errors: [String] = []
         checkSplitter(&errors)
         checkPaginator(&errors)
+        checkProvisionalPaging(&errors)
         checkEngine(&errors)
         checkLazyChapter(&errors)
         checkReaderCatalog(&errors)
@@ -110,6 +111,103 @@ enum LogicChecks {
         }
         if ranges.count < 2 {
             errors.append("长文本应当分成多页")
+        }
+    }
+
+    /// 首屏分页只是「先排几页交主线程」，补完后的整章排版必须与它逐页等价，
+    /// 且没排完之前不能被当作章末。这两条是排版下沉后台后不串页、不丢页的前提。
+    private static func checkProvisionalPaging(_ errors: inout [String]) {
+        let body = String(repeating: "风过檐铃不肯休。", count: 200)
+        let snapshot = ReaderSettingsStore(loadSaved: false).layoutSnapshot(interfaceDark: false)
+        let pageSize = CGSize(width: 220, height: 300)
+        let sourceBodyUTF16 = (body as NSString).length
+        if body.utf16.count <= 1500 {
+            errors.append("分段排版样本太短，测不到长章分支")
+            return
+        }
+        let head = ChapterLayouter.layout(
+            title: "第一章 檐铃",
+            body: body,
+            sourceBodyUTF16: sourceBodyUTF16,
+            snapshot: snapshot,
+            theme: ReadingThemes.paper,
+            pageSize: pageSize,
+            maxPages: ReaderEngine.provisionalFirstPages
+        )
+        let full = ChapterLayouter.layout(
+            title: "第一章 檐铃",
+            body: body,
+            sourceBodyUTF16: sourceBodyUTF16,
+            snapshot: snapshot,
+            theme: ReadingThemes.paper,
+            pageSize: pageSize
+        )
+        if head.isComplete {
+            errors.append("长章首屏分页不该一次排完整章")
+            return
+        }
+        if !full.isComplete {
+            errors.append("整章排版应当覆盖全章")
+        }
+        if head.pageCount != ReaderEngine.provisionalFirstPages {
+            errors.append("首屏分页页数不符：\(head.pageCount)")
+        }
+        if full.characterRanges.count <= head.characterRanges.count {
+            errors.append("整章排版的页数应当多于首屏")
+        }
+        for page in 0..<head.characterRanges.count {
+            if head.characterRanges[page] != full.characterRanges[page] {
+                errors.append("首屏分页第 \(page) 页与整章排版边界不一致")
+                break
+            }
+        }
+        if head.coversWholeChapter || !head.mayHaveMoreContent {
+            errors.append("首屏分页不该被判定为整章已排完")
+        }
+        let estimate = head.estimatedPageCount
+        let real = full.characterRanges.count
+        if estimate < head.pageCount || abs(estimate - real) > max(2, real / 5) {
+            errors.append("首屏分页数估算偏离真实页数：\(estimate) / \(real)")
+        }
+
+        // 引擎层：长章首屏没排完时翻页不能当作到了章末，取到权威排版后才补齐缓存。
+        let settings = ReaderSettingsStore(loadSaved: false)
+        let engine = ReaderEngine(
+            text: "第一章 檐铃\n\(body)\n",
+            fallbackTitle: "测",
+            startOffset: 0,
+            settings: settings
+        )
+        engine.setPageSize(pageSize)
+        guard let engineHead = engine.layout(for: 0) else {
+            errors.append("引擎长章没有排版")
+            return
+        }
+        if engineHead.isComplete {
+            errors.append("引擎长章首屏不该同步排完整章")
+        }
+        let lastKnown = engineHead.pageCount - 1
+        if engine.neighbor(after: ReaderPosition(chapterIndex: 0, pageIndex: lastKnown))?.pageIndex != lastKnown + 1 {
+            errors.append("首屏分页没排完就判定到了章末")
+        }
+        guard let authoritative = engine.completeLayout(for: 0), authoritative.isComplete else {
+            errors.append("权威排版没有排完整章")
+            return
+        }
+        if engine.layout(for: 0)?.isComplete != true {
+            errors.append("取过权威排版后，缓存应当换成整章结果")
+        }
+
+        // 阈值以下的短篇仍一次排完，保持改动前的行为。
+        let shortEngine = ReaderEngine(
+            text: "第一章 短\n\(String(repeating: "字", count: 800))\n",
+            fallbackTitle: "测",
+            startOffset: 0,
+            settings: settings
+        )
+        shortEngine.setPageSize(pageSize)
+        if shortEngine.layout(for: 0)?.isComplete != true {
+            errors.append("短篇应当一次排完整章")
         }
     }
 

@@ -57,13 +57,25 @@ final class ReaderEngine {
     @ObservationIgnored private var autoTask: Task<Void, Never>?
     @ObservationIgnored private var speakingPageRange: NSRange?
     @ObservationIgnored private var didPrintReady = false
+    /// 后台补全中的整章排版，按缓存键去重。
+    @ObservationIgnored private var warmTasks: [CacheKey: Task<Void, Never>] = [:]
+    /// 排版输入的代次：字号/页幅/正文内容一变就递增，后台结果按代次校验后再写回，避免旧排版覆盖新排版。
+    @ObservationIgnored private var layoutEpoch = 0
 
-    private struct CacheKey: Hashable {
+    private nonisolated struct CacheKey: Hashable, Sendable {
         var chapter: Int
         var width: Int
         var height: Int
         var snapshot: LayoutSnapshot
     }
+
+    /// 超过这个字数（UTF-16）的章节，主线程只排首屏几页，整章排版交给后台补完。
+    /// 阈值以下的短篇仍一次排完，行为与改动前完全一致。
+    nonisolated static let provisionalChapterUTF16 = 1500
+    /// 首屏分页的页数预算：够当前页与紧邻的两页立即有内容，工作量约为整章的几十分之一。
+    nonisolated static let provisionalFirstPages = 3
+    /// 后台预排的章节窗口（当前章前后各若干章）。
+    nonisolated static let prefetchLayoutRadius = 1
 
     init(text: String, fallbackTitle: String, startOffset: Int, settings: ReaderSettingsStore) {
         let normalized = TextDecoding.normalize(text)
@@ -218,7 +230,8 @@ final class ReaderEngine {
     var pageLabel: String {
         if position.boundaryRemote != nil { return "—" }
         if isEnd { return "完" }
-        let count = layout(for: position.chapterIndex)?.pageCount ?? 1
+        // 首屏分页阶段总数还是估算值，后台补完后会自动换成真实页数。
+        let count = layout(for: position.chapterIndex)?.estimatedPageCount ?? 1
         return "\(position.pageIndex + 1) / \(count)"
     }
 
@@ -230,47 +243,130 @@ final class ReaderEngine {
     }
 
     func layout(for chapterIndex: Int) -> ChapterLayout? {
+        guard let key = cacheKey(for: chapterIndex) else { return nil }
+        if let cached = cache[key] {
+            if !cached.isComplete { warmLayout(forKey: key, chapterIndex: chapterIndex) }
+            return cached
+        }
+        guard let job = layoutJob(for: chapterIndex) else { return nil }
+        var head = job
+        let laid: ChapterLayout
+        let bodyUTF16 = chapters[chapterIndex].bodyEnd - chapters[chapterIndex].bodyStart
+        if bodyUTF16 > Self.provisionalChapterUTF16 {
+            // 长章：主线程只排首屏页数，整章排版交给后台补完后再替换。
+            head.maxPages = Self.provisionalFirstPages
+            laid = head.run()
+            cache[key] = laid
+            warmLayout(forKey: key, chapterIndex: chapterIndex)
+        } else {
+            laid = job.run()
+            cache[key] = laid
+        }
+        trimCache(around: chapterIndex)
+        schedulePrelayoutAround(current: chapterIndex)
+        return laid
+    }
+
+    /// 取一定覆盖到某一页的排版。首屏分页还没补完时，宁可续排几页，也不让绘制端拿到空白页。
+    func layout(forChapter chapterIndex: Int, coveringPage pageIndex: Int) -> ChapterLayout? {
+        guard let laid = layout(for: chapterIndex) else { return nil }
+        if laid.covers(page: pageIndex) || laid.isComplete { return laid }
+        guard let key = cacheKey(for: chapterIndex) else { return laid }
+        if pageIndex > laid.pageCount + Self.provisionalFirstPages {
+            return completeLayout(for: chapterIndex) ?? laid
+        }
+        guard var job = layoutJob(for: chapterIndex) else { return laid }
+        job.maxPages = pageIndex + Self.provisionalFirstPages
+        let extended = job.run()
+        cache[key] = extended
+        warmLayout(forKey: key, chapterIndex: chapterIndex)
+        return extended
+    }
+
+    /// 权威排版（整章排完）：只在必须知道总页数的场合调用，例如跳到某章最后一页。
+    /// 后台预热正常命中时这里就是查缓存，只有冷缓存才会同步排整章。
+    func completeLayout(for chapterIndex: Int) -> ChapterLayout? {
+        guard let key = cacheKey(for: chapterIndex) else { return nil }
+        if let cached = cache[key], cached.isComplete { return cached }
+        guard var job = layoutJob(for: chapterIndex) else { return cache[key] }
+        job.maxPages = .max
+        let laid = job.run()
+        cache[key] = laid
+        trimCache(around: chapterIndex)
+        return laid
+    }
+
+    /// 后台补完整章排版。完成后按代次校验，只有输入没变、且仍在阅读窗口内才写回缓存。
+    private func warmLayout(forKey key: CacheKey, chapterIndex: Int) {
+        guard warmTasks[key] == nil else { return }
+        guard warmTasks.count < 3 else { return }
+        guard var job = layoutJob(for: chapterIndex) else { return }
+        job.maxPages = .max
+        let epoch = layoutEpoch
+        warmTasks[key] = Task.detached(priority: .userInitiated) { [weak self] in
+            let laid = job.run()
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.applyWarm(laid, forKey: key, chapterIndex: chapterIndex, epoch: epoch)
+            }
+        }
+    }
+
+    private func applyWarm(_ laid: ChapterLayout, forKey key: CacheKey, chapterIndex: Int, epoch: Int) {
+        warmTasks[key] = nil
+        guard epoch == layoutEpoch else { return }
+        guard cacheKey(for: chapterIndex) == key else { return }
+        guard abs(chapterIndex - position.chapterIndex) <= Self.prefetchLayoutRadius + 1 else { return }
+        guard cache[key]?.isComplete != true else { return }
+        cache[key] = laid
+        trimCache(around: position.chapterIndex)
+        if chapterIndex == position.chapterIndex {
+            // 页数分母与页内容都要换成权威排版重绘一次。
+            layoutRevision += 1
+        }
+    }
+
+    /// 排版输入变了（字号/页幅/正文）就作废所有在途后台排版，避免旧结果覆盖新缓存。
+    private func invalidateWarmTasks() {
+        layoutEpoch += 1
+        warmTasks.values.forEach { $0.cancel() }
+        warmTasks.removeAll()
+    }
+
+    private func cacheKey(for chapterIndex: Int) -> CacheKey? {
         guard chapters.indices.contains(chapterIndex) else { return nil }
         guard pageSize.width > 40, pageSize.height > 40 else { return nil }
-        let key = CacheKey(
+        return CacheKey(
             chapter: chapterIndex,
             width: Int(pageSize.width.rounded()),
             height: Int(pageSize.height.rounded()),
             snapshot: appliedLayout
         )
-        if let cached = cache[key] { return cached }
-        let chapter = chapters[chapterIndex]
-        let body = ChapterSplitter.substring(source, start: chapter.bodyStart, end: chapter.bodyEnd)
-        let script = ChineseScript(rawValue: appliedLayout.script) ?? .original
-        let theme = ReadingThemes.resolve(id: appliedLayout.themeID, interfaceDark: appliedLayout.interfaceDark)
-        let laid = ChapterLayouter.layout(
-            title: ChineseConverter.convert(chapter.title, to: script),
-            body: ChineseConverter.convert(body, to: script),
-            sourceBodyUTF16: (body as NSString).length,
-            snapshot: appliedLayout,
-            theme: theme,
-            pageSize: pageSize
-        )
-        cache[key] = laid
-        trimCache(around: chapterIndex)
-        schedulePrelayoutNextChapter(current: chapterIndex)
-        return laid
     }
 
-    /// 在主线程空闲时微任务预排下一章，使得翻到章末跨章滑动时直接命中缓存，零掉帧
-    private func schedulePrelayoutNextChapter(current chapterIndex: Int) {
-        let next = chapterIndex + 1
-        guard chapters.indices.contains(next) else { return }
-        let nextKey = CacheKey(
-            chapter: next,
-            width: Int(pageSize.width.rounded()),
-            height: Int(pageSize.height.rounded()),
-            snapshot: appliedLayout
+    private func layoutJob(for chapterIndex: Int) -> ChapterLayoutJob? {
+        guard chapters.indices.contains(chapterIndex) else { return nil }
+        guard pageSize.width > 40, pageSize.height > 40 else { return nil }
+        let chapter = chapters[chapterIndex]
+        return ChapterLayoutJob(
+            title: chapter.title,
+            body: ChapterSplitter.substring(source, start: chapter.bodyStart, end: chapter.bodyEnd),
+            script: ChineseScript(rawValue: appliedLayout.script) ?? .original,
+            snapshot: appliedLayout,
+            theme: ReadingThemes.resolve(id: appliedLayout.themeID, interfaceDark: appliedLayout.interfaceDark),
+            pageSize: pageSize,
+            maxPages: .max
         )
-        guard cache[nextKey] == nil else { return }
-        Task { @MainActor [weak self] in
-            guard let self, self.chapters.indices.contains(next) else { return }
-            _ = self.layout(for: next)
+    }
+
+    /// 后台预排阅读窗口两侧的章节，使跨章翻页直接命中缓存，且不占主线程。
+    private func schedulePrelayoutAround(current chapterIndex: Int) {
+        for offset in -Self.prefetchLayoutRadius...Self.prefetchLayoutRadius {
+            let target = chapterIndex + offset
+            guard target >= 0, chapters.indices.contains(target) else { continue }
+            guard let key = cacheKey(for: target), cache[key]?.isComplete != true else { continue }
+            warmLayout(forKey: key, chapterIndex: target)
         }
     }
 
@@ -523,6 +619,7 @@ final class ReaderEngine {
             )
         )
         // 保持前台正在阅读的既有章节排版缓存，仅当停在末尾加载页时才需要递增 layoutRevision 翻入新章
+        invalidateWarmTasks()
         askedForNext = false
         nextChapterFailed = false
         failedAt = nil
@@ -537,7 +634,7 @@ final class ReaderEngine {
             layoutRevision += 1
         }
         commit()
-        schedulePrelayoutNextChapter(current: position.chapterIndex)
+        schedulePrelayoutAround(current: position.chapterIndex)
         return true
     }
 
@@ -594,6 +691,7 @@ final class ReaderEngine {
             chapters[index].index = index
         }
         // 智能保留既有章节排版缓存，避免章末后台静默预取清空当前页排版导致掉帧闪烁
+        invalidateWarmTasks()
         if insertAt < oldCount {
             var updatedCache: [CacheKey: ChapterLayout] = [:]
             for (key, layout) in cache {
@@ -620,7 +718,7 @@ final class ReaderEngine {
             if forward {
                 position = ReaderPosition(chapterIndex: insertAt, pageIndex: 0)
             } else {
-                let pages = layout(for: insertAt)?.pageCount ?? 1
+                let pages = completeLayout(for: insertAt)?.pageCount ?? 1
                 position = ReaderPosition(chapterIndex: insertAt, pageIndex: max(pages - 1, 0))
             }
         } else if oldPosition.chapterIndex >= oldCount {
@@ -635,7 +733,7 @@ final class ReaderEngine {
             layoutRevision += 1
         }
         commit()
-        schedulePrelayoutNextChapter(current: position.chapterIndex)
+        schedulePrelayoutAround(current: position.chapterIndex)
         return true
     }
 
@@ -650,7 +748,7 @@ final class ReaderEngine {
 
     func pageExcerpt() -> String {
         if isEnd { return endTitle }
-        guard let laid = layout(for: position.chapterIndex) else { return "" }
+        guard let laid = layout(forChapter: position.chapterIndex, coveringPage: position.pageIndex) else { return "" }
         let raw = laid.plainText(page: position.pageIndex)
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -726,7 +824,7 @@ final class ReaderEngine {
         }
         if offset >= totalUTF16 {
             let last = chapters.count - 1
-            let pages = layout(for: last)?.pageCount ?? 1
+            let pages = completeLayout(for: last)?.pageCount ?? 1
             return ReaderPosition(chapterIndex: last, pageIndex: max(pages - 1, 0))
         }
         let index = chapterIndex(at: offset)
@@ -734,10 +832,15 @@ final class ReaderEngine {
             return ReaderPosition(chapterIndex: 0, pageIndex: 0)
         }
         let chapter = chapters[index]
-        guard let laid = layout(for: index) else {
+        guard var laid = layout(for: index) else {
             return ReaderPosition(chapterIndex: index, pageIndex: 0)
         }
-        let composed = composedLocation(for: offset, chapter: chapter, layout: laid)
+        var composed = composedLocation(for: offset, chapter: chapter, layout: laid)
+        // 进度恢复/转屏时目标可能落在首屏分页还没排到的位置，这时必须要权威排版
+        if !laid.isComplete, composed > laid.coveredEnd, let full = completeLayout(for: index) {
+            laid = full
+            composed = composedLocation(for: offset, chapter: chapter, layout: laid)
+        }
         var page = 0
         for (candidate, range) in laid.characterRanges.enumerated() {
             if range.location <= composed {
@@ -758,7 +861,8 @@ final class ReaderEngine {
         if isEnd { return totalUTF16 }
         guard let chapter = currentChapter else { return anchorOffset }
         if position.pageIndex <= 0 { return chapter.lineStart }
-        guard let laid = layout(for: chapter.index),
+        // 按页取排版：首屏分页没覆盖到这一页时先续排，不能把进度退回章首。
+        guard let laid = layout(forChapter: chapter.index, coveringPage: position.pageIndex),
               laid.characterRanges.indices.contains(position.pageIndex) else {
             return chapter.lineStart
         }
@@ -785,8 +889,10 @@ final class ReaderEngine {
 
     func neighbor(after position: ReaderPosition) -> ReaderPosition? {
         if position.boundaryRemote != nil || position.chapterIndex >= chapters.count { return nil }
-        let pages = layout(for: position.chapterIndex)?.pageCount ?? 1
-        if position.pageIndex + 1 < pages {
+        let laid = layout(for: position.chapterIndex)
+        // 首屏分页还没排完时不能当作到了章末：只要还有没排出的内容，就还有下一页。
+        let hasMoreInside = laid.map { position.pageIndex + 1 < $0.pageCount || $0.mayHaveMoreContent } ?? false
+        if hasMoreInside {
             return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: position.pageIndex + 1)
         }
         if remoteChapterCount > 0, let remote = remoteIndex(at: position.chapterIndex) {
@@ -811,7 +917,7 @@ final class ReaderEngine {
            chapters.indices.contains(position.chapterIndex) {
             let origin = chapters[position.chapterIndex]
             if remote > origin.remoteIndex {
-                let pages = layout(for: position.chapterIndex)?.pageCount ?? 1
+                let pages = completeLayout(for: position.chapterIndex)?.pageCount ?? 1
                 return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: max(pages - 1, 0))
             }
             return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: 0)
@@ -819,7 +925,7 @@ final class ReaderEngine {
         if position.chapterIndex >= chapters.count {
             guard !chapters.isEmpty else { return nil }
             let last = chapters.count - 1
-            let pages = layout(for: last)?.pageCount ?? 1
+            let pages = completeLayout(for: last)?.pageCount ?? 1
             return ReaderPosition(chapterIndex: last, pageIndex: max(pages - 1, 0))
         }
         if position.pageIndex > 0 {
@@ -829,14 +935,14 @@ final class ReaderEngine {
             let previousRemote = remote - 1
             guard previousRemote >= 0 else { return nil }
             if let loaded = engineIndex(ofRemote: previousRemote) {
-                let pages = layout(for: loaded)?.pageCount ?? 1
+                let pages = completeLayout(for: loaded)?.pageCount ?? 1
                 return ReaderPosition(chapterIndex: loaded, pageIndex: max(pages - 1, 0))
             }
             return ReaderPosition(chapterIndex: position.chapterIndex, pageIndex: -1, boundaryRemote: previousRemote)
         }
         let previous = position.chapterIndex - 1
         guard previous >= 0 else { return nil }
-        let pages = layout(for: previous)?.pageCount ?? 1
+        let pages = completeLayout(for: previous)?.pageCount ?? 1
         return ReaderPosition(chapterIndex: previous, pageIndex: max(pages - 1, 0))
     }
 
@@ -881,8 +987,10 @@ final class ReaderEngine {
 
     private var isOnLastLoadedPage: Bool {
         guard !chapters.isEmpty, position.chapterIndex == chapters.count - 1 else { return false }
-        let pages = layout(for: position.chapterIndex)?.pageCount ?? 1
-        return position.pageIndex >= pages - 1
+        guard let laid = layout(for: position.chapterIndex) else { return true }
+        // 还有没排出来的内容就说明本章没读完，不能提前去要下一章。
+        if laid.mayHaveMoreContent { return false }
+        return position.pageIndex >= laid.pageCount - 1
     }
 
     private func requestNextIfNeeded() {
@@ -935,6 +1043,7 @@ final class ReaderEngine {
     }
 
     private func relayoutKeepingOffset() {
+        invalidateWarmTasks()
         cache.removeAll()
         guard pageSize.width > 40, pageSize.height > 40 else { return }
         animateNextTurn = false
@@ -950,7 +1059,8 @@ final class ReaderEngine {
     }
 
     private func speakCurrentPage() {
-        guard !isEnd, let laid = layout(for: position.chapterIndex) else { return }
+        guard !isEnd,
+              let laid = layout(forChapter: position.chapterIndex, coveringPage: position.pageIndex) else { return }
         let text = laid.plainText(page: position.pageIndex)
         if laid.characterRanges.indices.contains(position.pageIndex) {
             speakingPageRange = laid.characterRanges[position.pageIndex]

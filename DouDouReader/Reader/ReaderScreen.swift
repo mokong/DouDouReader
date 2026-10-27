@@ -1747,7 +1747,7 @@ struct MacPageView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .foregroundStyle(theme.text.color)
-        } else if let layout = engine.layout(for: engine.position.chapterIndex),
+        } else if let layout = engine.layout(forChapter: engine.position.chapterIndex, coveringPage: engine.position.pageIndex),
                   layout.characterRanges.indices.contains(engine.position.pageIndex) {
             SelectablePageView(
                 attributed: NSAttributedString(attributedPage(layout, page: engine.position.pageIndex)),
