@@ -29,6 +29,7 @@ enum LogicChecks {
         checkSplitter(&errors)
         checkPaginator(&errors)
         checkProvisionalPaging(&errors)
+        checkIncrementalExtension(&errors)
         checkEngine(&errors)
         checkLazyChapter(&errors)
         checkReaderCatalog(&errors)
@@ -209,6 +210,240 @@ enum LogicChecks {
         shortEngine.setPageSize(pageSize)
         if shortEngine.layout(for: 0)?.isComplete != true {
             errors.append("短篇应当一次排完整章")
+        }
+    }
+
+    /// 增量续排是「翻页不从章首重排」的前提：续排出来的页边界必须与一次性排完逐页相同，
+    /// 一页一页爬到章末也要与整章排版完全一致，否则快翻会串页、跳页。
+    private static func checkIncrementalExtension(_ errors: inout [String]) {
+        let body = String(repeating: "风过檐铃不肯休。", count: 200)
+        let settings = ReaderSettingsStore(loadSaved: false)
+        let snapshot = settings.layoutSnapshot(interfaceDark: false)
+        let pageSize = CGSize(width: 220, height: 300)
+        let sourceBodyUTF16 = (body as NSString).length
+
+        func headLayout() -> ChapterLayout {
+            ChapterLayouter.layout(
+                title: "第一章 檐铃",
+                body: body,
+                sourceBodyUTF16: sourceBodyUTF16,
+                snapshot: snapshot,
+                theme: ReadingThemes.paper,
+                pageSize: pageSize,
+                maxPages: ReaderEngine.provisionalFirstPages
+            )
+        }
+
+        let full = ChapterLayouter.layout(
+            title: "第一章 檐铃",
+            body: body,
+            sourceBodyUTF16: sourceBodyUTF16,
+            snapshot: snapshot,
+            theme: ReadingThemes.paper,
+            pageSize: pageSize
+        )
+        guard full.isComplete, full.characterRanges.count > ReaderEngine.provisionalFirstPages + 6 else {
+            errors.append("增量续排样本太短，页数 \(full.characterRanges.count)")
+            return
+        }
+        let head = headLayout()
+        guard !head.isComplete else {
+            errors.append("增量续排样本不该一次排完")
+            return
+        }
+
+        let target = head.pageCount + 2
+        let stepped = head.extended(toPageCount: target)
+        if stepped.characterRanges.count != target {
+            errors.append("续排页数不符：\(stepped.characterRanges.count) / \(target)")
+        }
+        for page in stepped.characterRanges.indices
+        where stepped.characterRanges[page] != full.characterRanges[page] {
+            errors.append("续排第 \(page) 页与整章排版边界不一致")
+            break
+        }
+        if stepped.isComplete {
+            errors.append("只续排两页不该判定整章排完")
+        }
+        // 过期对象（它之后已经有人续排过）再续排会跳过中间的正文，必须原样退回。
+        if head.extended(toPageCount: target).characterRanges.count != head.characterRanges.count {
+            errors.append("过期的排版对象不该被再次续排")
+        }
+
+        var crawl = stepped
+        var hops = 0
+        while !crawl.isComplete, hops < 10_000 {
+            crawl = crawl.extended(toPageCount: crawl.pageCount + 1)
+            hops += 1
+        }
+        if !crawl.isComplete {
+            errors.append("逐页续排没能排完整章")
+        }
+        if crawl.characterRanges != full.characterRanges {
+            errors.append("逐页续排的页边界与整章排版不同")
+        }
+        if crawl.containers.count != crawl.characterRanges.count {
+            errors.append("续排后容器数与页数不符：\(crawl.containers.count)/\(crawl.characterRanges.count)")
+        }
+
+        let completed = headLayout().completed()
+        if !completed.isComplete || completed.characterRanges != full.characterRanges {
+            errors.append("completed() 与整章排版不等价")
+        }
+        let tiny = ChapterLayouter.layout(
+            title: "第三章 空",
+            body: "",
+            sourceBodyUTF16: 0,
+            snapshot: snapshot,
+            theme: ReadingThemes.paper,
+            pageSize: pageSize
+        )
+        if !tiny.isComplete || tiny.completed().characterRanges != tiny.characterRanges {
+            errors.append("空章续排后页数变了")
+        }
+
+        // 引擎层：翻到首屏分页之外的页时，续排结果必须与随后的权威排版一致。
+        let engine = ReaderEngine(
+            text: "第一章 檐铃\n\(body)\n",
+            fallbackTitle: "测",
+            startOffset: 0,
+            settings: settings
+        )
+        engine.setPageSize(pageSize)
+        guard let engineHead = engine.layout(for: 0), !engineHead.isComplete else {
+            errors.append("引擎长章首屏分页没有生效")
+            return
+        }
+        let nearPage = engineHead.pageCount + 1
+        guard let near = engine.layout(forChapter: 0, coveringPage: nearPage) else {
+            errors.append("引擎续排没有结果")
+            return
+        }
+        if !near.covers(page: nearPage) {
+            errors.append("续排没有覆盖到目标页 \(nearPage)/\(near.characterRanges.count)")
+        }
+        if near.isComplete {
+            errors.append("续排一页不该顺带排完整章")
+        }
+        guard let authoritative = engine.completeLayout(for: 0), authoritative.isComplete else {
+            errors.append("引擎权威排版没有排完整章")
+            return
+        }
+        for page in near.characterRanges.indices
+        where near.characterRanges[page] != authoritative.characterRanges[page] {
+            errors.append("引擎续排第 \(page) 页与权威排版边界不一致")
+            break
+        }
+
+        // 进度恢复/转屏：目标落在首屏分页之后时，续排定位必须与权威排版定位一致。
+        let restored = ReaderEngine(
+            text: "第一章 檐铃\n\(body)\n",
+            fallbackTitle: "测",
+            startOffset: 0,
+            settings: settings
+        )
+        restored.setPageSize(pageSize)
+        let chapter = restored.chapters[0]
+        let offset = chapter.bodyStart + (chapter.bodyEnd - chapter.bodyStart) * 2 / 3
+        let incremental = restored.positionFor(offset: offset)
+        if incremental.pageIndex <= ReaderEngine.provisionalFirstPages {
+            errors.append("续排定位样本没有落到首屏分页之后：\(incremental)")
+        }
+        _ = restored.completeLayout(for: 0)
+        let settled = restored.positionFor(offset: offset)
+        if incremental != settled {
+            errors.append("续排定位与权威排版定位不一致：\(incremental) / \(settled)")
+        }
+
+        checkSourceOffsets(engine, errors: &errors, label: "长章")
+        checkMutableSource(settings: settings, pageSize: pageSize, errors: &errors)
+    }
+
+    /// 正文改用 NSMutableString 存放之后，缓存的字数与每一章的偏移仍要对得上。
+    private static func checkSourceOffsets(_ engine: ReaderEngine, errors: inout [String], label: String) {
+        let ns = engine.source as NSString
+        if engine.totalUTF16 != ns.length {
+            errors.append("\(label)：totalUTF16 与正文长度不一致 \(engine.totalUTF16)/\(ns.length)")
+        }
+        for slice in engine.chapters {
+            guard slice.lineStart >= 0, slice.lineStart <= slice.bodyStart,
+                  slice.bodyStart <= slice.bodyEnd, slice.bodyEnd <= ns.length else {
+                errors.append("\(label)：章节「\(slice.title)」偏移越界")
+                return
+            }
+            let heading = ns.substring(
+                with: NSRange(location: slice.lineStart, length: min(slice.bodyStart, ns.length) - slice.lineStart)
+            )
+            if !heading.hasPrefix(slice.title) {
+                errors.append("\(label)：章节「\(slice.title)」的偏移对不上正文")
+                return
+            }
+        }
+    }
+
+    private static func checkMutableSource(
+        settings: ReaderSettingsStore,
+        pageSize: CGSize,
+        errors: inout [String]
+    ) {
+        let paragraph = String(repeating: "字", count: 800)
+        let appended = ReaderEngine(
+            text: "第一章 甲\n\(paragraph)\n",
+            fallbackTitle: "测",
+            startOffset: 0,
+            settings: settings
+        )
+        appended.setPageSize(pageSize)
+        checkSourceOffsets(appended, errors: &errors, label: "追加前")
+        if !appended.appendLoadedChapter(title: "第二章 乙", body: paragraph) {
+            errors.append("追加章节失败")
+            return
+        }
+        checkSourceOffsets(appended, errors: &errors, label: "追加后")
+        if appended.chapters.count != 2 {
+            errors.append("追加后章节数不对：\(appended.chapters.count)")
+        }
+
+        let sparse = ReaderEngine(
+            stored: [
+                StoredChapter(index: 0, title: "第一章 甲", body: paragraph),
+                StoredChapter(index: 4, title: "第五章 戊", body: paragraph)
+            ],
+            remoteCount: 6,
+            fallbackTitle: "测",
+            startOffset: 0,
+            settings: settings
+        )
+        sparse.setPageSize(pageSize)
+        checkSourceOffsets(sparse, errors: &errors, label: "插章前")
+        if !sparse.insertRemoteChapter(remoteIndex: 2, title: "第三章 丙", body: paragraph) {
+            errors.append("中间插章失败")
+            return
+        }
+        checkSourceOffsets(sparse, errors: &errors, label: "中间插章后")
+        if sparse.chapters.map(\.remoteIndex) != [0, 2, 4] {
+            errors.append("中间插章后的顺序不对：\(sparse.chapters.map(\.remoteIndex))")
+        }
+        if !sparse.insertRemoteChapter(remoteIndex: 1, title: "第二章 乙", body: paragraph) {
+            errors.append("章首插章失败")
+            return
+        }
+        checkSourceOffsets(sparse, errors: &errors, label: "章首插章后")
+        if !sparse.insertRemoteChapter(remoteIndex: 5, title: "第六章 己", body: paragraph) {
+            errors.append("章末插章失败")
+            return
+        }
+        checkSourceOffsets(sparse, errors: &errors, label: "章末插章后")
+        if sparse.chapters.map(\.remoteIndex) != [0, 1, 2, 4, 5] {
+            errors.append("插章后的顺序不对：\(sparse.chapters.map(\.remoteIndex))")
+        }
+        // 插章之后章节正文没有串位：每一章取出来的正文都该是自己的。
+        for slice in sparse.chapters {
+            let text = ChapterSplitter.substring(sparse.source, start: slice.bodyStart, end: slice.bodyEnd)
+            if !text.contains("字") || text.contains("第") {
+                errors.append("插章后「\(slice.title)」的正文串了")
+                return
+            }
         }
     }
 

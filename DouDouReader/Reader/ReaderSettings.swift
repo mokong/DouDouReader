@@ -138,6 +138,8 @@ final class ReaderSettingsStore {
 
     private(set) var revision = 0
     private var ready = false
+    /// 落盘去抖用的在途写入。
+    @ObservationIgnored private var pendingWrite: Task<Void, Never>?
 
     var pageMode: PageTurnMode {
         get { PageTurnMode(rawValue: pageModeRaw) ?? .curl }
@@ -252,9 +254,28 @@ final class ReaderSettingsStore {
         speechRate = min(0.8, max(0.32, speechRate))
     }
 
+    /// 滑块拖动时每 tick 都会改值，但只有停下来那一次值得写盘。
+    /// revision 仍然每次都涨，重排与重绘的节奏不变。
     private func persist() {
         guard ready else { return }
         revision += 1
+        pendingWrite?.cancel()
+        pendingWrite = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            self?.writeNow()
+        }
+    }
+
+    /// 立刻落盘。去抖窗口内的改动不能丢：退到后台时由 App 调一次。
+    func flush() {
+        pendingWrite?.cancel()
+        pendingWrite = nil
+        guard ready else { return }
+        writeNow()
+    }
+
+    private func writeNow() {
         let stored = Stored(store: self)
         if let data = try? JSONEncoder().encode(stored) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)

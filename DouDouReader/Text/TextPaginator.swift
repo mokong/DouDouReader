@@ -48,27 +48,14 @@ enum TextPaginator {
         layout.delegate = delegate
         storage.addLayoutManager(layout)
 
-        var result: [NSRange] = []
-        var location = 0
-        while location < length && result.count < 100_000 {
-            let container = NSTextContainer(size: pageSize)
-            container.lineFragmentPadding = 0
-            container.lineBreakMode = .byCharWrapping
-            layout.addTextContainer(container)
-            layout.ensureLayout(for: container)
-            let glyphRange = layout.glyphRange(for: container)
-            var charRange = layout.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-            if charRange.location < location {
-                let end = NSMaxRange(charRange)
-                charRange = NSRange(location: location, length: max(0, end - location))
-            }
-            if charRange.length == 0 || NSMaxRange(charRange) <= location {
-                result.append(NSRange(location: location, length: length - location))
-                break
-            }
-            result.append(charRange)
-            location = NSMaxRange(charRange)
-        }
+        let pages = ChapterLayouter.appendPages(
+            layoutManager: layout,
+            storageLength: length,
+            pageSize: pageSize,
+            from: 0,
+            pageBudget: 100_000
+        )
+        var result = pages.ranges
         if result.isEmpty {
             return [NSRange(location: 0, length: length)]
         }
@@ -148,9 +135,90 @@ nonisolated final class ChapterLayout: @unchecked Sendable {
         guard characterRanges.indices.contains(index) else { return "" }
         return storage.attributedSubstring(from: characterRanges[index]).string
     }
+
+    var pageSize: CGSize { containers.first?.size ?? .zero }
+
+    /// 在已有的 layoutManager 上继续往后排，直到凑够 targetPages 页或整章排完。
+    ///
+    /// 复用首屏分页已经排出的部分，代价只与「新增的页」成正比：跨页快翻不再每翻一页
+    /// 都从章首重排一遍，重排/恢复进度也不必为了后半章把整章重新构建一次。
+    /// 分页循环与一次性排完共用 `ChapterLayouter.appendPages`，页边界不会分歧。
+    /// TextKit 对象非线程安全，续排只允许在主线程发生。
+    @MainActor
+    func extended(toPageCount targetPages: Int) -> ChapterLayout {
+        guard !isComplete, pageSize.width >= 20, pageSize.height >= 20 else { return self }
+        // 续排会往同一个 layoutManager 上追加容器。拿到过期对象（它之后已经有人续排过）再排，
+        // 新容器会接在已有的最后一个容器后面，中间的正文被整段跳过。这种情况原样退回，
+        // 由调用方改用缓存里最新的那份。
+        guard layoutManager.textContainers.count == containers.count else { return self }
+        let budget = targetPages >= pageCount ? targetPages - pageCount : 0
+        guard budget > 0 else { return self }
+        let appended = ChapterLayouter.appendPages(
+            layoutManager: layoutManager,
+            storageLength: storage.length,
+            pageSize: pageSize,
+            from: coveredEnd,
+            pageBudget: budget
+        )
+        guard let last = appended.ranges.last else { return self }
+        let ranges = characterRanges + appended.ranges
+        return ChapterLayout(
+            storage: storage,
+            layoutManager: layoutManager,
+            delegate: delegate,
+            containers: containers + appended.containers,
+            characterRanges: ranges,
+            titlePrefix: titlePrefix,
+            sourceBodyUTF16: sourceBodyUTF16,
+            composedBodyUTF16: composedBodyUTF16,
+            isComplete: NSMaxRange(last) >= storage.length
+        )
+    }
+
+    @MainActor
+    func completed() -> ChapterLayout {
+        extended(toPageCount: Int.max)
+    }
 }
 
 nonisolated enum ChapterLayouter {
+    /// 从 startLocation 起，往同一个 layoutManager 上继续追加页面容器，每页一个 container。
+    /// 一次排完与增量续排都走这里，页边界因此只有一份实现。
+    nonisolated static func appendPages(
+        layoutManager: NSLayoutManager,
+        storageLength: Int,
+        pageSize: CGSize,
+        from startLocation: Int,
+        pageBudget: Int
+    ) -> (containers: [NSTextContainer], ranges: [NSRange]) {
+        var containers: [NSTextContainer] = []
+        var ranges: [NSRange] = []
+        let budget = min(max(pageBudget, 1), 100_000)
+        var location = max(0, startLocation)
+        while location < storageLength && ranges.count < budget {
+            let container = NSTextContainer(size: pageSize)
+            container.lineFragmentPadding = 0
+            container.lineBreakMode = .byCharWrapping
+            layoutManager.addTextContainer(container)
+            layoutManager.ensureLayout(for: container)
+            let glyphRange = layoutManager.glyphRange(for: container)
+            var charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+            if charRange.location < location {
+                let end = NSMaxRange(charRange)
+                charRange = NSRange(location: location, length: max(0, end - location))
+            }
+            if charRange.length == 0 || NSMaxRange(charRange) <= location {
+                ranges.append(NSRange(location: location, length: storageLength - location))
+                containers.append(container)
+                break
+            }
+            ranges.append(charRange)
+            containers.append(container)
+            location = NSMaxRange(charRange)
+        }
+        return (containers, ranges)
+    }
+
     static func layout(
         title: String,
         body: String,
@@ -179,49 +247,30 @@ nonisolated enum ChapterLayouter {
         let delegate = ChapterLayoutManagerDelegate()
         layoutManager.delegate = delegate
         storage.addLayoutManager(layoutManager)
-        var containers: [NSTextContainer] = []
-        var ranges: [NSRange] = []
         let length = storage.length
-        let pageBudget = min(max(maxPages, 1), 100_000)
-        var location = 0
-        while location < length && ranges.count < pageBudget {
-            let container = NSTextContainer(size: pageSize)
-            container.lineFragmentPadding = 0
-            container.lineBreakMode = .byCharWrapping
-            layoutManager.addTextContainer(container)
-            layoutManager.ensureLayout(for: container)
-            let glyphRange = layoutManager.glyphRange(for: container)
-            var charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-            if charRange.location < location {
-                let end = NSMaxRange(charRange)
-                charRange = NSRange(location: location, length: max(0, end - location))
-            }
-            if charRange.length == 0 || NSMaxRange(charRange) <= location {
-                ranges.append(NSRange(location: location, length: length - location))
-                containers.append(container)
-                break
-            }
-            ranges.append(charRange)
-            containers.append(container)
-            location = NSMaxRange(charRange)
-        }
-        if ranges.isEmpty {
+        var pages = appendPages(
+            layoutManager: layoutManager,
+            storageLength: length,
+            pageSize: pageSize,
+            from: 0,
+            pageBudget: maxPages
+        )
+        if pages.ranges.isEmpty {
             let container = NSTextContainer(size: pageSize)
             container.lineFragmentPadding = 0
             layoutManager.addTextContainer(container)
-            containers = [container]
-            ranges = [NSRange(location: 0, length: length)]
+            pages = ([container], [NSRange(location: 0, length: length)])
         }
         return ChapterLayout(
             storage: storage,
             layoutManager: layoutManager,
             delegate: delegate,
-            containers: containers,
-            characterRanges: ranges,
+            containers: pages.containers,
+            characterRanges: pages.ranges,
             titlePrefix: built.titlePrefix,
             sourceBodyUTF16: sourceBodyUTF16,
             composedBodyUTF16: built.bodyUTF16,
-            isComplete: ranges.last.map { NSMaxRange($0) >= length } ?? true
+            isComplete: pages.ranges.last.map { NSMaxRange($0) >= length } ?? true
         )
     }
 }

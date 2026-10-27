@@ -103,6 +103,31 @@ private nonisolated enum BookOpenPreparation {
     }
 }
 
+/// 进度落盘节流：翻页只改内存里的 BookRecord，磁盘最多每 3 秒写一次。
+/// 退出阅读页、App 退到后台时 flush 补一次，保证节流窗口里的进度不丢。
+private final class ProgressSaver {
+    private let save: () -> Void
+    private var lastSaveAt: Date?
+    private let interval: TimeInterval = 3
+
+    init(save: @escaping () -> Void) {
+        self.save = save
+    }
+
+    func touch() {
+        let now = Date()
+        if let last = lastSaveAt, now.timeIntervalSince(last) < interval { return }
+        lastSaveAt = now
+        save()
+    }
+
+    func flush() {
+        guard lastSaveAt != nil else { return }
+        lastSaveAt = nil
+        save()
+    }
+}
+
 struct ReaderScreen: View {
     var book: BookRecord
     @Query(sort: \SourceRecord.addedAt) private var sourceRecords: [SourceRecord]
@@ -151,7 +176,9 @@ struct ReaderScreen: View {
     @State private var brightnessHUDTask: Task<Void, Never>?
     /// 朗读被音频会话中断（来电/其他 App 抢占）后弹出的确认窗：继续朗读 / 退出朗读。
     @State private var showSpeechInterruptionAlert = false
+    @State private var progressSaver: ProgressSaver?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
 
     private var currentSourceName: String? {
         guard !book.remoteSourceID.isEmpty else { return nil }
@@ -182,9 +209,15 @@ struct ReaderScreen: View {
         .task { await openBookForAppearance() }
         .onDisappear {
             engine?.stopActivities()
+            progressSaver?.flush()
+            settings.flush()
             cacheGeneration += 1
             cacheTask?.cancel()
             brightnessHUDTask?.cancel()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // 退到后台可能被系统直接杀掉，onDisappear 不一定会来，这里补一次落盘。
+            if phase != .active { progressSaver?.flush() }
         }
     }
 
@@ -1049,12 +1082,14 @@ struct ReaderScreen: View {
             startOffset: prepared.startOffset,
             settings: settings
         )
+        let saver = ProgressSaver { try? modelContext.save() }
+        progressSaver = saver
         created.onProgress = { chapter, offset, title in
             book.chapterIndex = chapter
             book.utf16Offset = offset
             book.currentChapterTitle = title
             book.lastReadAt = Date()
-            try? modelContext.save()
+            saver.touch()
         }
         if prepared.isRemote {
             created.onNeedRemoteChapter = { [weak created] index in
@@ -1291,7 +1326,9 @@ struct ReaderScreen: View {
             book.loadedChapterCount = engine.chapters.count
             book.totalUTF16 = engine.totalUTF16
             if !allowConcurrent {
-                book.contentHash = BookLibrary.hash(engine.source)
+                // 这里不算 contentHash：它是整本正文的 SHA256，只有导入本地 TXT 时用来查重，
+                // 而在线书每下一章都重算一遍等于把全书读一次，全在主线程上。
+                // 整本缓存结束/中断时仍会更新它。
                 try? modelContext.save()
             }
             if jumpAfter, generation == nil || generation == catalogGeneration {

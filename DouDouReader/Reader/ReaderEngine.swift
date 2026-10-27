@@ -20,7 +20,11 @@ struct SearchHit: Identifiable, Equatable {
 
 @Observable
 final class ReaderEngine {
-    private(set) var source: String
+    /// 正文用 NSMutableString 存：按 UTF-16 下标取一章正文是 O(章) 而不是 O(全书)，
+    /// 在线书追加一章也不必在主线程重建整本字符串。
+    @ObservationIgnored private let sourceText: NSMutableString
+    /// 正文字节数缓存：插章时的容量校验不必每次重算整本 UTF-8。
+    @ObservationIgnored private var sourceUTF8Count = 0
     private(set) var chapters: [ChapterSlice]
     let speech = SpeechController()
     let settings: ReaderSettingsStore
@@ -79,10 +83,10 @@ final class ReaderEngine {
 
     init(text: String, fallbackTitle: String, startOffset: Int, settings: ReaderSettingsStore) {
         let normalized = TextDecoding.normalize(text)
-        source = normalized
+        sourceText = NSMutableString(string: normalized)
+        sourceUTF8Count = normalized.utf8.count
         chapters = ChapterSplitter.split(normalized, fallbackTitle: fallbackTitle)
-        let total = (normalized as NSString).length
-        anchorOffset = min(max(0, startOffset), total)
+        anchorOffset = min(max(0, startOffset), sourceText.length)
         self.settings = settings
         appliedLayout = settings.layoutSnapshot(interfaceDark: false)
         bindSpeech()
@@ -105,10 +109,10 @@ final class ReaderEngine {
             text = built.text
             chapters = built.slices
         }
-        source = text
+        sourceText = NSMutableString(string: text)
+        sourceUTF8Count = text.utf8.count
         remoteChapterCount = remoteCount
-        let total = (text as NSString).length
-        anchorOffset = min(max(0, startOffset), total)
+        anchorOffset = min(max(0, startOffset), sourceText.length)
         self.settings = settings
         appliedLayout = settings.layoutSnapshot(interfaceDark: false)
         bindSpeech()
@@ -122,13 +126,13 @@ final class ReaderEngine {
         startOffset: Int,
         settings: ReaderSettingsStore
     ) {
-        source = text
+        sourceText = NSMutableString(string: text)
+        sourceUTF8Count = text.utf8.count
         self.chapters = chapters.isEmpty
             ? ChapterSplitter.split(text, fallbackTitle: text)
             : chapters
         remoteChapterCount = remoteCount
-        let total = (text as NSString).length
-        anchorOffset = min(max(0, startOffset), total)
+        anchorOffset = min(max(0, startOffset), sourceText.length)
         self.settings = settings
         appliedLayout = settings.layoutSnapshot(interfaceDark: false)
         bindSpeech()
@@ -143,7 +147,19 @@ final class ReaderEngine {
         }
     }
 
-    var totalUTF16: Int { (source as NSString).length }
+    var totalUTF16: Int { sourceText.length }
+
+    /// 全文快照。桥接会复制一份，只在确实要整本的场合用（存档哈希、全文搜索）。
+    var source: String { sourceText as String }
+
+    /// 取一章正文。NSMutableString 的 substring(with:) 只与这一章的长度成正比，
+    /// 不像 `String as NSString` 那样每次都要把全书索引一遍。
+    private func chapterText(_ chapter: ChapterSlice) -> String {
+        let total = sourceText.length
+        let lower = min(max(0, chapter.bodyStart), total)
+        let upper = min(max(lower, chapter.bodyEnd), total)
+        return sourceText.substring(with: NSRange(location: lower, length: upper - lower))
+    }
 
     var isEnd: Bool { position.chapterIndex >= chapters.count && position.boundaryRemote == nil }
 
@@ -272,28 +288,43 @@ final class ReaderEngine {
         guard let laid = layout(for: chapterIndex) else { return nil }
         if laid.covers(page: pageIndex) || laid.isComplete { return laid }
         guard let key = cacheKey(for: chapterIndex) else { return laid }
-        if pageIndex > laid.pageCount + Self.provisionalFirstPages {
-            return completeLayout(for: chapterIndex) ?? laid
-        }
-        guard var job = layoutJob(for: chapterIndex) else { return laid }
-        job.maxPages = pageIndex + Self.provisionalFirstPages
-        let extended = job.run()
+        // 往后翻得越远，续排越接近整章：干脆一次排完，后面几页就不用再排了。
+        // 无论哪种，都在首屏已排的部分上接着排，不再从章首重来。
+        let extended = pageIndex > laid.pageCount + Self.provisionalFirstPages
+            ? laid.completed()
+            : laid.extended(toPageCount: pageIndex + Self.provisionalFirstPages)
         cache[key] = extended
-        warmLayout(forKey: key, chapterIndex: chapterIndex)
+        if extended.isComplete {
+            cancelWarm(key)
+        } else {
+            warmLayout(forKey: key, chapterIndex: chapterIndex)
+        }
         return extended
     }
 
     /// 权威排版（整章排完）：只在必须知道总页数的场合调用，例如跳到某章最后一页。
-    /// 后台预热正常命中时这里就是查缓存，只有冷缓存才会同步排整章。
+    /// 后台预热正常命中时这里就是查缓存；冷缓存时若已有首屏分页，也只补齐缺的那部分。
     func completeLayout(for chapterIndex: Int) -> ChapterLayout? {
         guard let key = cacheKey(for: chapterIndex) else { return nil }
-        if let cached = cache[key], cached.isComplete { return cached }
+        if let cached = cache[key] {
+            guard !cached.isComplete else { return cached }
+            let completed = cached.completed()
+            cancelWarm(key)
+            cache[key] = completed
+            trimCache(around: chapterIndex)
+            return completed
+        }
         guard var job = layoutJob(for: chapterIndex) else { return cache[key] }
         job.maxPages = .max
         let laid = job.run()
         cache[key] = laid
         trimCache(around: chapterIndex)
         return laid
+    }
+
+    /// 主线程已经把这一章排完了，后台再排一遍纯属浪费，直接撤掉。
+    private func cancelWarm(_ key: CacheKey) {
+        warmTasks.removeValue(forKey: key)?.cancel()
     }
 
     /// 后台补完整章排版。完成后按代次校验，只有输入没变、且仍在阅读窗口内才写回缓存。
@@ -351,7 +382,7 @@ final class ReaderEngine {
         let chapter = chapters[chapterIndex]
         return ChapterLayoutJob(
             title: chapter.title,
-            body: ChapterSplitter.substring(source, start: chapter.bodyStart, end: chapter.bodyEnd),
+            body: chapterText(chapter),
             script: ChineseScript(rawValue: appliedLayout.script) ?? .original,
             snapshot: appliedLayout,
             theme: ReadingThemes.resolve(id: appliedLayout.themeID, interfaceDark: appliedLayout.interfaceDark),
@@ -593,11 +624,14 @@ final class ReaderEngine {
         guard !cleaned.isEmpty else { return false }
         let oldCount = chapters.count
         let viewingEnd = position.chapterIndex >= oldCount
-        let separator = source.isEmpty || source.hasSuffix("\n") ? "" : "\n"
-        let titleStart = (source as NSString).length + (separator as NSString).length
-        source += "\(separator)\(title)\n\(cleaned)\n"
+        let oldLength = sourceText.length
+        let separator = oldLength == 0 || sourceText.hasSuffix("\n") ? "" : "\n"
+        let titleStart = oldLength + (separator as NSString).length
+        let piece = "\(separator)\(title)\n\(cleaned)\n"
+        sourceText.append(piece)
+        sourceUTF8Count += piece.utf8.count
         let bodyStart = titleStart + (title as NSString).length + 1
-        let bodyEnd = (source as NSString).length
+        let bodyEnd = sourceText.length
         if chapters.indices.contains(oldCount - 1) {
             chapters[oldCount - 1].bodyEnd = titleStart
         }
@@ -637,7 +671,7 @@ final class ReaderEngine {
         if chapters.contains(where: { $0.remoteIndex == target }) { return true }
         let piece = StoredChapters.block(title: title, body: cleaned)
         let pieceLength = (piece as NSString).length
-        guard source.utf8.count + piece.utf8.count <= BookStorage.byteLimit else { return false }
+        guard sourceUTF8Count + piece.utf8.count <= BookStorage.byteLimit else { return false }
         let insertAt = chapters.firstIndex { $0.remoteIndex > target } ?? chapters.count
         let oldCount = chapters.count
         let oldPosition = position
@@ -645,16 +679,19 @@ final class ReaderEngine {
         let originRemote = remoteIndex(at: oldPosition.chapterIndex)
         let insertOffset: Int
         if chapters.isEmpty || insertAt == 0 {
-            source = piece + source
+            sourceText.insert(piece, at: 0)
+            sourceUTF8Count += piece.utf8.count
             insertOffset = 0
         } else if insertAt == chapters.count {
-            let gap = source.hasSuffix("\n") || source.isEmpty ? "" : "\n"
-            insertOffset = (source as NSString).length + (gap as NSString).length
-            source += gap + piece
+            let gap = sourceText.length == 0 || sourceText.hasSuffix("\n") ? "" : "\n"
+            insertOffset = sourceText.length + (gap as NSString).length
+            sourceText.append(gap)
+            sourceText.append(piece)
+            sourceUTF8Count += gap.utf8.count + piece.utf8.count
         } else {
             insertOffset = chapters[insertAt].lineStart
-            let ns = source as NSString
-            source = ns.substring(to: insertOffset) + piece + ns.substring(from: insertOffset)
+            sourceText.insert(piece, at: insertOffset)
+            sourceUTF8Count += piece.utf8.count
         }
         if insertAt > 0, chapters.indices.contains(insertAt - 1) {
             chapters[insertAt - 1].bodyEnd = insertOffset
@@ -827,11 +864,25 @@ final class ReaderEngine {
         guard var laid = layout(for: index) else {
             return ReaderPosition(chapterIndex: index, pageIndex: 0)
         }
-        var composed = composedLocation(for: offset, chapter: chapter, layout: laid)
-        // 进度恢复/转屏时目标可能落在首屏分页还没排到的位置，这时必须要权威排版
-        if !laid.isComplete, composed > laid.coveredEnd, let full = completeLayout(for: index) {
-            laid = full
-            composed = composedLocation(for: offset, chapter: chapter, layout: laid)
+        let composed = composedLocation(for: offset, chapter: chapter, layout: laid)
+        // 进度恢复/转屏时目标可能落在首屏分页还没排到的位置：按已排页面的平均字数估算
+        // 还差几页，一次续排到位，不再为了后半章把整章重新构建一遍。
+        if !laid.isComplete, composed > laid.coveredEnd, let key = cacheKey(for: index) {
+            var extended = laid
+            var targetPages = extended.pageCount
+            while !extended.isComplete, composed > extended.coveredEnd {
+                let perPage = max(1, extended.coveredEnd / max(1, extended.characterRanges.count))
+                let missing = max(1, composed - extended.coveredEnd)
+                targetPages += max(1, (missing + perPage - 1) / perPage) + 1
+                let next = extended.extended(toPageCount: targetPages)
+                if next.characterRanges.count == extended.characterRanges.count { break }
+                extended = next
+            }
+            if extended !== laid {
+                cache[key] = extended
+                if extended.isComplete { cancelWarm(key) } else { warmLayout(forKey: key, chapterIndex: index) }
+                laid = extended
+            }
         }
         var page = 0
         for (candidate, range) in laid.characterRanges.enumerated() {
@@ -1077,7 +1128,7 @@ final class ReaderEngine {
             onHighlight?(nil)
         }
         let script = ChineseScript(rawValue: appliedLayout.script) ?? .original
-        let raw = ChapterSplitter.substring(source, start: chapter.bodyStart, end: chapter.bodyEnd)
+        let raw = chapterText(chapter)
         let body = ChapterTextBuilder.plainParagraphs(
             ChineseConverter.convert(raw, to: script),
             blockWords: appliedLayout.blockWords

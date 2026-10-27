@@ -9,6 +9,7 @@ import AppKit
 @main
 struct MyApp: App {
     @State private var settings = ReaderSettingsStore()
+    @Environment(\.scenePhase) private var scenePhase
     private let container: ModelContainer
 
     init() {
@@ -31,6 +32,10 @@ struct MyApp: App {
             }
             .environment(settings)
             .modelContainer(container)
+            .onChange(of: scenePhase) { _, phase in
+                // 设置写盘是去抖的，退到后台可能就没有下一次机会了。
+                if phase != .active { settings.flush() }
+            }
         }
     }
 }
