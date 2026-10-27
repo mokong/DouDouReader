@@ -38,6 +38,8 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
     private var appliedMode: PageTurnMode?
     private var linkedGestureCount = -1
     private var syncing = false
+    private var flow = PageTurnFlow()
+    private var settleWork: DispatchWorkItem?
 
     init(engine: ReaderEngine, settings: ReaderSettingsStore) {
         self.engine = engine
@@ -64,6 +66,7 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        cancelSettleWatchdog()
         navigationController?.interactivePopGestureRecognizer?.isEnabled = true
     }
 
@@ -85,19 +88,12 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         let revision = engine.layoutRevision
         let target = engine.position
         if displayed != target || appliedRevision != revision {
-            let animated = engine.animateNextTurn && displayed.chapterIndex >= 0
+            // 「无」模式的语义就是不出动画：引擎给点按/自动朗读设的 animateNextTurn 在这里收口。
+            // displayed.chapterIndex < 0 是首屏落位，同样不播动画，否则一打开书就先翻一页。
+            let wantsAnimation = engine.animateNextTurn && mode != .none && displayed.chapterIndex >= 0
             engine.animateNextTurn = false
-            let direction = direction(from: displayed, to: target)
-            displayed = target
-            appliedRevision = revision
-            let targetVC = makePage(target)
-            pageController.setViewControllers([targetVC], direction: direction, animated: animated) { [weak self] finished in
-                if animated && finished {
-                    DispatchQueue.main.async {
-                        guard let self, self.displayed == target else { return }
-                        self.pageController?.setViewControllers([targetVC], direction: direction, animated: false, completion: nil)
-                    }
-                }
+            if case .apply(let animated) = flow.request(target, revision: revision, animated: wantsAnimation) {
+                apply(target, revision: revision, animated: animated, in: pageController)
             }
         } else if let visible = pageController.viewControllers?.first as? PageContentController {
             visible.apply(textRect: textRect, theme: theme, fontName: settings.fontName)
@@ -113,6 +109,122 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
                   visible.position == self.engine.position else { return }
             visible.setHighlight(range, color: self.highlightColor)
         }
+    }
+
+    private func apply(
+        _ target: ReaderPosition,
+        revision: Int,
+        animated: Bool,
+        in pageController: UIPageViewController
+    ) {
+        let direction = direction(from: displayed, to: target)
+        displayed = target
+        appliedRevision = revision
+        let targetVC = makePage(target)
+        guard animated else {
+            pageController.setViewControllers([targetVC], direction: direction, animated: false, completion: nil)
+            return
+        }
+        flow.beginAnimated()
+        armSettleWatchdog()
+        pageController.setViewControllers([targetVC], direction: direction, animated: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.finishAnimated(targetVC: targetVC, in: pageController)
+            }
+        }
+    }
+
+    private func finishAnimated(targetVC: PageContentController, in pageController: UIPageViewController) {
+        // 只在「这一页仍然是屏幕上那一页」时补落：这次强落是为了压掉转场残留的半页图层，
+        // 若期间手指已经拖到别的页，再落 targetVC 就是把读者往回拽。
+        if !flow.interactive, !isFingerDown, pageController.viewControllers?.first === targetVC {
+            // 方向不参与动画：非动画再落一次，只把 presentation layer 压回终态。
+            pageController.setViewControllers([targetVC], direction: .forward, animated: false, completion: nil)
+        }
+        flow.endAnimated()
+        settle()
+    }
+
+    /// 占用全部解除后收敛：先按非动画落一次终态，再把排队期间的目标页补上。
+    private func settle() {
+        guard !flow.isBusy, let pageController else { return }
+        guard !isFingerDown else {
+            // 占用已解除但手指还按着：这一轮不落页，等看门狗在手指抬起后补落。
+            armSettleWatchdog()
+            return
+        }
+        cancelSettleWatchdog()
+        if let visible = pageController.viewControllers, !visible.isEmpty {
+            pageController.setViewControllers(visible, direction: .forward, animated: false, completion: nil)
+        }
+        if let request = flow.takePending(),
+           // 跟手那一下已经落到位的请求不用再补一遍，否则同页会再翻一次。
+           displayed != request.position || appliedRevision != request.revision {
+            apply(request.position, revision: request.revision, animated: request.animated, in: pageController)
+        }
+        sync()
+    }
+
+    private func armSettleWatchdog() {
+        cancelSettleWatchdog()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.flow.isBusy || self.flow.pending != nil else { return }
+            guard !self.isFingerDown else {
+                self.armSettleWatchdog()
+                return
+            }
+            // 系统弹窗、sheet、手势取消都可能让 UIKit 不再回调收尾；
+            // 这里强制解除占用并落位，避免翻页永远卡在半空、也避免排队的目标页被吞掉。
+            self.flow.forceIdle()
+            self.settle()
+        }
+        settleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    private func cancelSettleWatchdog() {
+        settleWork?.cancel()
+        settleWork = nil
+    }
+
+    private var isFingerDown: Bool {
+        let recognizers = (pageController?.gestureRecognizers ?? []) + (pageController?.view.gestureRecognizers ?? [])
+        return recognizers.contains { $0.state == .began || $0.state == .changed }
+    }
+
+    func pageViewController(
+        _ pageViewController: UIPageViewController,
+        willTransitionTo pendingViewControllers: [UIViewController]
+    ) {
+        // 我们自己发起的动画转场也会回调这里，那种情况不能按跟手处理：
+        // 跟手的收尾只靠 delegate，一旦不回调就会把后续翻页全堵在排队里。
+        guard !flow.animated else { return }
+        flow.beginInteractive()
+        armSettleWatchdog()
+    }
+
+    func pageViewController(
+        _ pageViewController: UIPageViewController,
+        didFinishAnimating finished: Bool,
+        previousViewControllers: [UIViewController],
+        transitionCompleted completed: Bool
+    ) {
+        let visible = pageViewController.viewControllers?.first as? PageContentController
+        if let visible {
+            // 屏幕上的这一页是唯一事实：不管翻成还是回弹，displayed 都对齐它。
+            displayed = visible.position
+        }
+        if completed, let visible {
+            let startedFrom = previousViewControllers.first as? PageContentController
+            // 跟手期间引擎已被点按/自动朗读推进过，以引擎为准，不把位置回退到本次拖起的页。
+            if startedFrom == nil || engine.position == startedFrom!.position {
+                engine.adopt(position: visible.position)
+            }
+        }
+        // appliedRevision 故意不动：它还停在可见页真正用的那一版，
+        // 排队里的新排版（后台整章排完）才不会被误当成「已经应用过」。
+        flow.endInteractive()
+        settle()
     }
 
     func pageViewController(
@@ -138,17 +250,6 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         return makePage(ReaderPosition(chapterIndex: engine.chapters.count, pageIndex: 0))
     }
 
-    func pageViewController(
-        _ pageViewController: UIPageViewController,
-        didFinishAnimating finished: Bool,
-        previousViewControllers: [UIViewController],
-        transitionCompleted completed: Bool
-    ) {
-        guard completed, let visible = pageViewController.viewControllers?.first as? PageContentController else { return }
-        displayed = visible.position
-        engine.adopt(position: visible.position)
-    }
-
     private var effectiveMode: PageTurnMode {
         #if os(visionOS)
         if settings.pageMode == .curl { return .horizontal }
@@ -168,6 +269,9 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
             pageController.view.removeFromSuperview()
             pageController.removeFromParent()
         }
+        // 旧控制器的转场随它一起没了，占用与排队都不能留到新控制器上。
+        flow.reset()
+        cancelSettleWatchdog()
         let style: UIPageViewController.TransitionStyle = mode == .curl ? .pageCurl : .scroll
         let orientation: UIPageViewController.NavigationOrientation = mode == .vertical ? .vertical : .horizontal
         var options: [UIPageViewController.OptionsKey: Any]?
@@ -281,6 +385,9 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
     }
 
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+        // 手指还在跟手翻页：UIKit 自己会把这一页落完，这里再点一次会起第二段转场，
+        // 两段半页叠在半空就是「两页卡在中间」。
+        guard !isFingerDown else { return }
         let width = max(view.bounds.width, 1)
         engine.handleTap(xFraction: gesture.location(in: view).x / width)
         sync()

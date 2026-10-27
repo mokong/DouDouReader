@@ -52,6 +52,7 @@ enum LogicChecks {
         checkXBS(&errors)
         checkBookUpdateComparison(&errors)
         checkReaderTapZones(&errors)
+        checkPageTurnFlow(&errors)
         checkBookCachePlan(&errors)
         checkSpeechEntry(&errors)
         checkSpeechRateMenu(&errors)
@@ -2672,34 +2673,90 @@ enum LogicChecks {
         if shrunk.newChapterCount != 0 { errors.append("检查更新: 源删章不应计为新章节 \(shrunk)") }
     }
 
-    /// 极简模式与正常模式的点按区域：边缘翻页、中间唤出，边界不重叠。
+    /// 点按区域：左 30% 翻上一页、右 30% 翻下一页、中间唤出/收起工具栏。
     private static func checkReaderTapZones(_ errors: inout [String]) {
-        // 正常模式：左 30% 翻上一页，右 30% 翻下一页，中间唤出工具栏。
-        if ReaderEngine.tapAction(xFraction: 0.05, simpleMode: false) != .prevPage {
-            errors.append("点按区域: 正常模式左侧应翻上一页")
+        if ReaderEngine.tapAction(xFraction: 0.05) != .prevPage {
+            errors.append("点按区域: 左侧应翻上一页")
         }
-        if ReaderEngine.tapAction(xFraction: 0.50, simpleMode: false) != .toggleChrome {
-            errors.append("点按区域: 正常模式中间应唤出工具栏")
+        if ReaderEngine.tapAction(xFraction: 0.30) != .toggleChrome {
+            errors.append("点按区域: 30% 边界应属唤出区")
         }
-        if ReaderEngine.tapAction(xFraction: 0.95, simpleMode: false) != .nextPage {
-            errors.append("点按区域: 正常模式右侧应翻下一页")
+        if ReaderEngine.tapAction(xFraction: 0.50) != .toggleChrome {
+            errors.append("点按区域: 中间应唤出工具栏")
         }
-        // 极简模式：左右各 12% 边缘翻页，其余全部唤出。
-        if ReaderEngine.tapAction(xFraction: 0.05, simpleMode: true) != .prevPage {
-            errors.append("点按区域: 极简模式左边缘应翻上一页")
+        if ReaderEngine.tapAction(xFraction: 0.70) != .toggleChrome {
+            errors.append("点按区域: 70% 边界应属唤出区")
         }
-        if ReaderEngine.tapAction(xFraction: 0.95, simpleMode: true) != .nextPage {
-            errors.append("点按区域: 极简模式右边缘应翻下一页")
+        if ReaderEngine.tapAction(xFraction: 0.95) != .nextPage {
+            errors.append("点按区域: 右侧应翻下一页")
         }
-        if ReaderEngine.tapAction(xFraction: 0.50, simpleMode: true) != .toggleChrome {
-            errors.append("点按区域: 极简模式中间应唤出工具栏")
+    }
+
+    /// 翻页转场调度：转场在飞时不许再改页面，新目标合并排队，落定后一次性取出。
+    private static func checkPageTurnFlow(_ errors: inout [String]) {
+        // 空闲：请求立即应用，动画意图原样传出。
+        var idle = PageTurnFlow()
+        if idle.request(ReaderPosition(chapterIndex: 0, pageIndex: 1), revision: 3, animated: true) != .apply(animated: true) {
+            errors.append("翻页调度: 空闲时请求应立即应用")
         }
-        // 边界本身（0.12 / 0.88）不算边缘翻页，避免与唤出区域冲突。
-        if ReaderEngine.tapAction(xFraction: 0.12, simpleMode: true) != .toggleChrome {
-            errors.append("点按区域: 极简模式 12% 边界应属唤出区")
+        if idle.pending != nil {
+            errors.append("翻页调度: 空闲时不应产生排队")
         }
-        if ReaderEngine.tapAction(xFraction: 0.88, simpleMode: true) != .toggleChrome {
-            errors.append("点按区域: 极简模式 88% 边界应属唤出区")
+        // 跟手（或动画）期间：只排队，不许再起第二段转场。
+        var flow = PageTurnFlow()
+        flow.beginInteractive()
+        if flow.request(ReaderPosition(chapterIndex: 0, pageIndex: 1), revision: 3, animated: false) != .queued {
+            errors.append("翻页调度: 跟手期间请求应排队")
+        }
+        // 连点合并到最后一页，动画意图取并集（用户已经按下的那一次不能丢）。
+        if flow.request(ReaderPosition(chapterIndex: 0, pageIndex: 2), revision: 3, animated: true) != .queued {
+            errors.append("翻页调度: 跟手期间后续请求应继续合并排队")
+        }
+        if flow.pending?.position != ReaderPosition(chapterIndex: 0, pageIndex: 2) || flow.pending?.animated != true {
+            errors.append("翻页调度: 排队应保留最终落点与动画意图 \(String(describing: flow.pending))")
+        }
+        // 后台整章排版回写：位置没变、只有版本号变，同样要能排队。
+        if flow.request(ReaderPosition(chapterIndex: 0, pageIndex: 2), revision: 4, animated: false) != .queued {
+            errors.append("翻页调度: 排版版本变化应排队")
+        }
+        if flow.pending?.revision != 4 {
+            errors.append("翻页调度: 排队应取最新排版版本")
+        }
+        // 两段转场必须各自解除才算空闲：跟手结束但动画还在飞时不许落页。
+        flow.endInteractive()
+        flow.beginAnimated()
+        if !flow.isBusy {
+            errors.append("翻页调度: 动画播放中仍应视为占用")
+        }
+        flow.endAnimated()
+        if flow.isBusy {
+            errors.append("翻页调度: 两段转场都结束后应解除占用")
+        }
+        guard let request = flow.takePending() else {
+            errors.append("翻页调度: 落定后应能取出排队请求")
+            return
+        }
+        if request.position != ReaderPosition(chapterIndex: 0, pageIndex: 2) || request.revision != 4 || !request.animated {
+            errors.append("翻页调度: 取出的排队请求与预期不符")
+        }
+        if flow.pending != nil {
+            errors.append("翻页调度: 排队取出后应清空")
+        }
+        // 兜底：UIKit 不回调收尾时强制解除占用，排队仍需补落。
+        var stuck = PageTurnFlow()
+        stuck.beginInteractive()
+        _ = stuck.request(ReaderPosition(chapterIndex: 1, pageIndex: 0), revision: 9, animated: false)
+        stuck.forceIdle()
+        if stuck.isBusy || stuck.takePending()?.position != ReaderPosition(chapterIndex: 1, pageIndex: 0) {
+            errors.append("翻页调度: 强制解除占用后排队仍应可落位")
+        }
+        // 切换翻页模式会重建控制器，旧占用与旧排队一起作废。
+        var switched = PageTurnFlow()
+        switched.beginAnimated()
+        _ = switched.request(ReaderPosition(chapterIndex: 0, pageIndex: 5), revision: 1, animated: true)
+        switched.reset()
+        if switched.isBusy || switched.pending != nil {
+            errors.append("翻页调度: reset 后占用与排队都应清空")
         }
     }
 

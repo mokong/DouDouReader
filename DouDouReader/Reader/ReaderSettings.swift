@@ -135,8 +135,6 @@ final class ReaderSettingsStore {
     var speechVoiceID: String = "" { didSet { persist() } }
     var sleepMinutes: Int = 0 { didSet { persist() } }
     var blockWords: String = "" { didSet { persist() } }
-    /// 极简模式：沉浸阅读态，隐藏页眉页脚与工具栏，点按中间唤出。
-    var simpleMode: Bool = false { didSet { persist() } }
 
     private(set) var revision = 0
     private var ready = false
@@ -207,7 +205,6 @@ final class ReaderSettingsStore {
             speechVoiceID = stored.speechVoiceID
             sleepMinutes = stored.sleepMinutes
             blockWords = stored.blockWords
-            simpleMode = stored.simpleMode ?? false
         }
         clamp()
         ready = loadSaved
@@ -295,8 +292,6 @@ final class ReaderSettingsStore {
         var speechVoiceID: String
         var sleepMinutes: Int
         var blockWords: String
-        /// 可选：旧存档没有这个字段，解码时回退为 false。
-        var simpleMode: Bool?
 
         init(store: ReaderSettingsStore) {
             fontSize = store.fontSize
@@ -327,7 +322,6 @@ final class ReaderSettingsStore {
             speechVoiceID = store.speechVoiceID
             sleepMinutes = store.sleepMinutes
             blockWords = store.blockWords
-            simpleMode = store.simpleMode
         }
 
         init(from decoder: Decoder) throws {
@@ -360,7 +354,6 @@ final class ReaderSettingsStore {
             speechVoiceID = try c.decodeIfPresent(String.self, forKey: .speechVoiceID) ?? ""
             sleepMinutes = try c.decodeIfPresent(Int.self, forKey: .sleepMinutes) ?? 0
             blockWords = try c.decodeIfPresent(String.self, forKey: .blockWords) ?? ""
-            simpleMode = try c.decodeIfPresent(Bool.self, forKey: .simpleMode)
         }
     }
 }

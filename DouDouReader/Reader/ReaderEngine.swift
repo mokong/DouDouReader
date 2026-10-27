@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import Observation
 
-struct ReaderPosition: Equatable {
+struct ReaderPosition: Equatable, Sendable {
     var chapterIndex: Int
     var pageIndex: Int
     /// 停在章节交界、等待这一章下载时使用。空表示正在读正文。
@@ -464,27 +464,19 @@ final class ReaderEngine {
             showsChrome = true
             return
         }
-        if xFraction < 0.30 {
-            go(delta: -1)
-        } else if xFraction > 0.70 {
-            go(delta: 1)
-        } else {
-            showsChrome.toggle()
+        switch Self.tapAction(xFraction: xFraction) {
+        case .prevPage: go(delta: -1)
+        case .nextPage: go(delta: 1)
+        case .toggleChrome: showsChrome.toggle()
         }
     }
 
-    /// 点按区域判定（纯函数）：正常模式左右各 30% 翻页、中间唤出工具栏；
-    /// 极简模式收窄为左右各 12% 边缘翻页，其余全部区域唤出/收起，避免与翻页冲突。
+    /// 点按区域判定（纯函数）：左右各 30% 翻页，中间唤出/收起工具栏。
     enum TapAction {
         case prevPage, nextPage, toggleChrome
     }
 
-    nonisolated static func tapAction(xFraction: CGFloat, simpleMode: Bool) -> TapAction {
-        if simpleMode {
-            if xFraction < 0.12 { return .prevPage }
-            if xFraction > 0.88 { return .nextPage }
-            return .toggleChrome
-        }
+    nonisolated static func tapAction(xFraction: CGFloat) -> TapAction {
         if xFraction < 0.30 { return .prevPage }
         if xFraction > 0.70 { return .nextPage }
         return .toggleChrome

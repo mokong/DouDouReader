@@ -417,8 +417,7 @@ struct ReaderScreen: View {
         safeBottom: CGFloat
     ) -> some View {
         VStack(spacing: 0) {
-            // 极简模式：连页眉页脚这些常驻文字一起隐藏，只留正文。
-            if settings.showsHeader && !settings.simpleMode {
+            if settings.showsHeader {
                 HStack(spacing: 8) {
                     if settings.showTime {
                         TimelineView(.periodic(from: .now, by: 30)) { timeline in
@@ -441,7 +440,7 @@ struct ReaderScreen: View {
                 .padding(.top, safeTop + 8)
             }
             Spacer()
-            if settings.showsFooter && !settings.simpleMode {
+            if settings.showsFooter {
                 HStack {
                     if settings.showPageProgress {
                         Text(engine.pageLabel)
@@ -723,10 +722,6 @@ struct ReaderScreen: View {
                 showSearch = true
             }
             Button("书签") { showBookmarks = true }
-            Button(settings.simpleMode ? "退出极简模式" : "极简模式") {
-                settings.simpleMode.toggle()
-                engine.showsChrome = false
-            }
             if canSwitchSource {
                 Button("换源") {
                     presentSourceSwitch(preferring: engine.currentChapter?.title ?? book.currentChapterTitle)
@@ -1691,7 +1686,7 @@ struct MacPageView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { location in
-                applyTap(xFraction: location.x / max(proxy.size.width, 1))
+                engine.handleTap(xFraction: location.x / max(proxy.size.width, 1))
             }
             .onAppear {
                 engine.setPageSize(placement.pageSize)
@@ -1711,25 +1706,6 @@ struct MacPageView: View {
         .onKeyPress(.rightArrow) {
             engine.go(delta: 1)
             return .handled
-        }
-    }
-
-    /// 正常模式：左 30% 上一页 / 右 30% 下一页 / 中间唤出工具栏（沿用 handleTap）。
-    /// 极简模式：左右各 12% 边缘翻页，其余全部区域点按唤出/收起，避免与翻页冲突。
-    private func applyTap(xFraction: CGFloat) {
-        if engine.autoRunning {
-            engine.stopAuto()
-            engine.showsChrome = true
-            return
-        }
-        guard settings.simpleMode else {
-            engine.handleTap(xFraction: xFraction)
-            return
-        }
-        switch ReaderEngine.tapAction(xFraction: xFraction, simpleMode: true) {
-        case .prevPage: engine.go(delta: -1)
-        case .nextPage: engine.go(delta: 1)
-        case .toggleChrome: engine.showsChrome.toggle()
         }
     }
 
@@ -1753,7 +1729,7 @@ struct MacPageView: View {
                 attributed: NSAttributedString(attributedPage(layout, page: engine.position.pageIndex)),
                 layoutDelegate: layout.delegate,
                 onTapXFraction: { xf in
-                    applyTap(xFraction: xf)
+                    engine.handleTap(xFraction: xf)
                 },
                 onSearchText: onSearchSelectedText
             )
