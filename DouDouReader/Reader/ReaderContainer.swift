@@ -88,9 +88,13 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         let revision = engine.layoutRevision
         let target = engine.position
         if displayed != target || appliedRevision != revision {
-            // 「无」模式的语义就是不出动画：引擎给点按/自动朗读设的 animateNextTurn 在这里收口。
+            // 程序化翻页（点按、自动翻页、朗读推进）的动画意图在这里收口：
+            // 仿真模式只让手指跟手播 curl，点按再起一段动画会和跟手那段叠成两张半页停在中间；
+            // 「无」模式的语义则是任何场合都不出动画。
             // displayed.chapterIndex < 0 是首屏落位，同样不播动画，否则一打开书就先翻一页。
-            let wantsAnimation = engine.animateNextTurn && mode != .none && displayed.chapterIndex >= 0
+            let wantsAnimation = engine.animateNextTurn
+                && PageTurnFlow.programmaticAnimationAllowed(for: mode)
+                && displayed.chapterIndex >= 0
             engine.animateNextTurn = false
             if case .apply(let animated) = flow.request(target, revision: revision, animated: wantsAnimation) {
                 apply(target, revision: revision, animated: animated, in: pageController)

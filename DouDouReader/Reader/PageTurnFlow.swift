@@ -61,4 +61,11 @@ nonisolated struct PageTurnFlow {
         defer { pending = nil }
         return pending
     }
+
+    /// 程序化翻页（点按、自动翻页、朗读推进）是否允许播转场动画。
+    /// 仿真模式把 curl 只留给手指跟手：点按再起一段 curl，会和跟手那段叠成两张半页停在中间。
+    /// 「无」模式的语义则是任何场合都不出动画。
+    nonisolated static func programmaticAnimationAllowed(for mode: PageTurnMode) -> Bool {
+        mode != .none && mode != .curl
+    }
 }

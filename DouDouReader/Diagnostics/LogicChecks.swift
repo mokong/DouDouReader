@@ -2758,6 +2758,17 @@ enum LogicChecks {
         if switched.isBusy || switched.pending != nil {
             errors.append("翻页调度: reset 后占用与排队都应清空")
         }
+        // 程序化翻页的动画意图：仿真模式把 curl 只留给手指跟手，点按/自动翻页/朗读即时落页；
+        // 「无」模式任何场合都不出动画；左右/上下滑动仍可播转场。
+        if PageTurnFlow.programmaticAnimationAllowed(for: .curl) {
+            errors.append("翻页调度: 仿真模式程序化翻页应即时落页")
+        }
+        if PageTurnFlow.programmaticAnimationAllowed(for: .none) {
+            errors.append("翻页调度: 「无」模式不应播动画")
+        }
+        for mode in [PageTurnMode.horizontal, .vertical] where !PageTurnFlow.programmaticAnimationAllowed(for: mode) {
+            errors.append("翻页调度: \(mode.rawValue) 模式程序化翻页应播动画")
+        }
     }
 
     /// 全本缓存计划：断点续下跳过已落盘章节；字节格式化。
