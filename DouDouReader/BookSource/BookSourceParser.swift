@@ -213,6 +213,7 @@ enum BookSourceParser {
             if let replace = ruleContent["replaceRegex"] as? String, !replace.isEmpty {
                 contentRule.replaceRules = [replace]
             }
+            contentRule.nextContentURLSelector = (ruleContent["nextContentUrl"] as? String) ?? ""
         }
 
         // 发现规则：切换站点后，频道和筛选都从这里来
@@ -340,6 +341,9 @@ enum BookSourceParser {
             tocRule.infoAuthorSelector = (detailAction["author"] as? String) ?? ""
             tocRule.infoCoverSelector = (detailAction["cover"] as? String) ?? (detailAction["coverUrl"] as? String) ?? ""
             tocRule.tocURLSelector = (detailAction["tocUrl"] as? String) ?? (detailAction["chapterUrl"] as? String) ?? ""
+            if let reqInfo = detailAction["requestInfo"] as? String, !reqInfo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                tocRule.detailRequestTemplate = normalizeXiangSeURL(reqInfo, baseURL: sourceUrl)
+            }
         }
         if let chapterAction = dict["chapterList"] as? [String: Any] {
             tocRule.listSelector = chapterAction["list"] as? String ?? ""
@@ -356,6 +360,10 @@ enum BookSourceParser {
         var contentRule = SourceContentRule()
         if let contentAction = dict["chapterContent"] as? [String: Any] {
             contentRule.contentSelector = contentAction["content"] as? String ?? ""
+            contentRule.nextContentURLSelector = (contentAction["nextPageUrl"] as? String)
+                ?? (contentAction["nextContentUrl"] as? String)
+                ?? (contentAction["moreKeys"] as? String)
+                ?? ""
             if let replaceStr = (contentAction["replace"] as? String) ?? (contentAction["purify"] as? String),
                !replaceStr.isEmpty {
                 contentRule.replaceRules = replaceStr

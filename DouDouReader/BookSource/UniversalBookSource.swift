@@ -298,6 +298,8 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
     var infoAuthorSelector: String = ""
     /// 详情页封面选择器（来自 ruleBookInfo.coverUrl 或 bookDetail.cover）。
     var infoCoverSelector: String = ""
+    /// 详情页 URL 模板（香色 bookDetail.requestInfo 规范化后的结果）。搜索结果只给出纯书号时用它拼装详情页地址。
+    var detailRequestTemplate: String = ""
 
     nonisolated init(
         tocURLSelector: String = "",
@@ -307,7 +309,8 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         startAtFirstChapter: Bool = false,
         infoNameSelector: String = "",
         infoAuthorSelector: String = "",
-        infoCoverSelector: String = ""
+        infoCoverSelector: String = "",
+        detailRequestTemplate: String = ""
     ) {
         self.tocURLSelector = tocURLSelector
         self.listSelector = listSelector
@@ -317,11 +320,13 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         self.infoNameSelector = infoNameSelector
         self.infoAuthorSelector = infoAuthorSelector
         self.infoCoverSelector = infoCoverSelector
+        self.detailRequestTemplate = detailRequestTemplate
     }
 
     private enum CodingKeys: String, CodingKey {
         case tocURLSelector, listSelector, nameSelector, urlSelector, startAtFirstChapter
         case infoNameSelector, infoAuthorSelector, infoCoverSelector
+        case detailRequestTemplate
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -334,6 +339,7 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         infoNameSelector = try container.decodeIfPresent(String.self, forKey: .infoNameSelector) ?? ""
         infoAuthorSelector = try container.decodeIfPresent(String.self, forKey: .infoAuthorSelector) ?? ""
         infoCoverSelector = try container.decodeIfPresent(String.self, forKey: .infoCoverSelector) ?? ""
+        detailRequestTemplate = try container.decodeIfPresent(String.self, forKey: .detailRequestTemplate) ?? ""
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -346,6 +352,7 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         try container.encode(infoNameSelector, forKey: .infoNameSelector)
         try container.encode(infoAuthorSelector, forKey: .infoAuthorSelector)
         try container.encode(infoCoverSelector, forKey: .infoCoverSelector)
+        try container.encode(detailRequestTemplate, forKey: .detailRequestTemplate)
     }
 }
 
@@ -355,12 +362,34 @@ nonisolated struct SourceContentRule: Codable, Sendable, Equatable {
     var contentSelector: String = ""
     /// 正文清洗规则（正则表达式替换，如 "##广告##"）
     var replaceRules: [String] = []
+    /// 章节内分页的下一页链接选择器，为空时由启发式识别「下一页」。
+    var nextContentURLSelector: String = ""
 
     nonisolated init(
         contentSelector: String = "",
-        replaceRules: [String] = []
+        replaceRules: [String] = [],
+        nextContentURLSelector: String = ""
     ) {
         self.contentSelector = contentSelector
         self.replaceRules = replaceRules
+        self.nextContentURLSelector = nextContentURLSelector
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case contentSelector, replaceRules, nextContentURLSelector
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        contentSelector = try container.decodeIfPresent(String.self, forKey: .contentSelector) ?? ""
+        replaceRules = try container.decodeIfPresent([String].self, forKey: .replaceRules) ?? []
+        nextContentURLSelector = try container.decodeIfPresent(String.self, forKey: .nextContentURLSelector) ?? ""
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(contentSelector, forKey: .contentSelector)
+        try container.encode(replaceRules, forKey: .replaceRules)
+        try container.encode(nextContentURLSelector, forKey: .nextContentURLSelector)
     }
 }

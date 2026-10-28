@@ -436,7 +436,10 @@ struct SourceBrowserView: View {
                         .foregroundColor(.white)
                         .lineLimit(1)
 
-                    Text("\(author) · \(category) · \(status)")
+                    Text([author, category, status]
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: " · "))
                         .font(.system(size: 13))
                         .foregroundColor(Color.white.opacity(0.6))
                         .lineLimit(1)

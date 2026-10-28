@@ -84,7 +84,7 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
                 group.addTask {
                     semaphore.wait()
                     defer { semaphore.signal() }
-                    let content = try await downloadChapter(item.url)
+                    let content = try await downloadChapter(item.url, title: item.title)
                     try await counter.add(content.utf8.count)
                     return (index, content)
                 }
@@ -109,7 +109,7 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
     func fetchOpening(bookID: String) async throws -> OnlineOpening {
         let prepared = try await prepare(bookID: bookID)
         guard let first = prepared.chapters.first else { throw SourceError.emptyBook }
-        let body = try await downloadChapter(first.url)
+        let body = try await downloadChapter(first.url, title: first.title)
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SourceError.emptyBook
         }
@@ -157,9 +157,7 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
     }
 
     private func prepare(bookID: String) async throws -> PreparedBook {
-        guard let bookURL = resolveURL(bookID, relativeTo: source.sourceURL) else {
-            throw SourceError.badURL
-        }
+        let bookURL = try detailURL(bookID: bookID)
 
         var detailRequest = URLRequest(url: bookURL)
         detailRequest.timeoutInterval = 20
@@ -176,37 +174,228 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         let authorRule = source.tocRule.infoAuthorSelector.isEmpty ? "//span[@class='author']/text()" : source.tocRule.infoAuthorSelector
         let author = HTMLMiniParser.queryStrings(root: detailRoot, rule: authorRule).first ?? ""
         let coverURL = extractDetailCoverURL(from: detailRoot, baseURL: bookURL)
-        let chapters = try await loadChapterList(bookURL: bookURL, detailRoot: detailRoot)
+
+        var chapters: [(title: String, url: URL)] = []
+        if source.tocRule.listSelector.hasPrefix("$"), let json = Self.jsonObject(from: detailHtml) {
+            chapters = loadChapterList(bookURL: bookURL, json: json)
+        }
+        if chapters.isEmpty {
+            chapters = try await loadChapterList(bookURL: bookURL, detailRoot: detailRoot)
+        }
         guard !chapters.isEmpty else { throw SourceError.emptyBook }
         return PreparedBook(title: title, author: author, coverURL: coverURL, chapters: chapters)
     }
 
-    private func downloadChapter(_ url: URL) async throws -> String {
+    /// 搜索结果只给出纯书号时，用香色 bookDetail.requestInfo 模板拼装详情页地址；其余情况维持直接解析。
+    private func detailURL(bookID: String) throws -> URL {
+        let trimmed = bookID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let template = source.tocRule.detailRequestTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 含 :// / 路径分隔 / query 的 bookID 本身就是可用地址，只有纯 ID 才需要模板拼装。
+        if !template.isEmpty, !trimmed.isEmpty,
+           !trimmed.contains("://"), !trimmed.contains("/"), !trimmed.contains("?") {
+            for token in ["%@result", "{{key}}", "%@"] where template.contains(token) {
+                if let url = resolveURL(template.replacingOccurrences(of: token, with: trimmed), relativeTo: source.sourceURL) {
+                    return url
+                }
+            }
+        }
+        guard let url = resolveURL(trimmed, relativeTo: source.sourceURL) else { throw SourceError.badURL }
+        return url
+    }
+
+    private static func jsonObject(from text: String) -> Any? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else { return nil }
+        guard let data = trimmed.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data)
+    }
+
+    /// 详情页直接返回 JSON 时，按 listSelector（如 $.data.chapters）提取章节数组。
+    private func loadChapterList(bookURL: URL, json: Any) -> [(title: String, url: URL)] {
+        guard let raw = navigateJSON(json, path: source.tocRule.listSelector),
+              let array = raw as? [Any] else { return [] }
+        var entries: [(title: String, url: URL)] = []
+        for case let item as [String: Any] in array {
+            let name = jsonString(in: item, selector: source.tocRule.nameSelector, fallbackKeys: ["title", "name", "chapterName"]) ?? ""
+            guard let href = jsonString(in: item, selector: source.tocRule.urlSelector, fallbackKeys: ["url", "href", "chapterUrl", "link"]),
+                  let chapterURL = resolveURL(href, relativeTo: bookURL.absoluteString) else { continue }
+            entries.append((name.isEmpty ? "章节" : name, chapterURL))
+        }
+        return entries
+    }
+
+    /// JSON 字段取值：选择器写成 `$.a.b` 时按路径导航，写成 `text`/`href` 这类 HTML 别名时按候选键回退。
+    private func jsonString(in item: [String: Any], selector: String, fallbackKeys: [String]) -> String? {
+        let path = selector.trimmingCharacters(in: .whitespacesAndNewlines)
+        if path.hasPrefix("$"), let value = navigateJSON(item, path: path) {
+            return Self.stringFromJSONValue(value)
+        }
+        for key in [path] + fallbackKeys where !key.isEmpty {
+            if let value = item[key] { return Self.stringFromJSONValue(value) }
+        }
+        return nil
+    }
+
+    private func downloadChapter(_ url: URL, title: String = "") async throws -> String {
+        var currentURL = url
+        var visited: Set<String> = [url.absoluteString]
+        var pages: [String] = []
+        var fetched = 0
+        let maxPages = 10
+
+        while true {
+            let page: ChapterPage
+            do {
+                page = try await fetchChapterPage(url: currentURL)
+            } catch {
+                // 中间页失败时保留已抓到的页；首页失败仍按原语义抛出。
+                if fetched == 0 { throw error }
+                break
+            }
+            fetched += 1
+            // 正文接口直接返回 JSON 时，按 $.a.b[0] 极简 JSONPath 取值，不参与分页。
+            if let jsonBody = page.jsonBody {
+                if pages.isEmpty { return jsonBody }
+                pages.append(jsonBody)
+                break
+            }
+
+            let body = stripPaginationNoise(page.body, chapterTitle: title, isFirstPage: fetched == 1)
+            if !body.isEmpty { pages.append(body) }
+
+            guard fetched < maxPages,
+                  let root = page.root,
+                  let next = extractNextContentPageURL(from: root, currentPageURL: currentURL, firstPageURL: url),
+                  !visited.contains(next.absoluteString) else { break }
+            visited.insert(next.absoluteString)
+            currentURL = next
+        }
+        return applyReplaceRules(pages.joined(separator: "\n\n")).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private struct ChapterPage {
+        /// 启发式找下一页要用它；JSON 响应时为 nil。
+        var root: HTMLNode?
+        /// 未过 replaceRules 的正文文本。
+        var body: String
+        /// JSON 正文接口返回的已清洗正文。
+        var jsonBody: String?
+    }
+
+    private func fetchChapterPage(url: URL) async throws -> ChapterPage {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         applyBrowserHeaders(to: &request, baseURL: url)
         let data = try await loadData(request: request)
         let raw = decode(data.0, response: data.1)
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 正文接口直接返回 JSON 时，按 $.a.b[0] 极简 JSONPath 取值。
-        if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
-            let body = chapterBodyFromJSON(trimmed)
-            if !body.isEmpty {
-                return body
-            }
+        if let json = Self.jsonObject(from: raw) {
+            let body = chapterBodyFromJSON(json)
+            if !body.isEmpty { return ChapterPage(root: nil, body: "", jsonBody: body) }
         }
         let root = HTMLMiniParser.parse(raw)
-        return chapterBody(from: root)
+        return ChapterPage(root: root, body: chapterRawText(from: root), jsonBody: nil)
     }
 
     /// 从 JSON 正文响应中按 contentRule.contentSelector（如 $.chapter.content）提取正文。
-    private func chapterBodyFromJSON(_ text: String) -> String {
-        guard let data = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) else { return "" }
+    private func chapterBodyFromJSON(_ json: Any) -> String {
         let selector = source.contentRule.contentSelector
         guard !selector.isEmpty, let value = navigateJSON(json, path: selector) else { return "" }
         let body = Self.stringFromJSONValue(value)
         return applyReplaceRules(body).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 行尾的页码标记：`(1/3)`、`（第2/2页）`。按单行匹配，`$` 保证只吃行尾。
+    private nonisolated static let pageMarkerRegex = try? NSRegularExpression(
+        pattern: #"[（(]\s*(?:第\s*)?\d+\s*/\s*\d+\s*页?\s*[)）]\s*$"#
+    )
+
+    /// 整行都以提示词开头才算噪音，避免删掉含「下一页」字样的正文句子。
+    private nonisolated static let pageHintRegex = try? NSRegularExpression(
+        pattern: #"^(?:本章未完[^\n]{0,24}|下一页[^\n]{0,16}|下一节[^\n]{0,16}|上一页[^\n]{0,16}|正在手打中[^\n]{0,16}|第?\s*\d+\s*/\s*\d+\s*页?|第\s*\d+\s*页)$"#
+    )
+
+    /// 剥离分页交界处的页码、翻页提示语与重复章节标题。
+    private func stripPaginationNoise(_ text: String, chapterTitle: String, isFirstPage: Bool) -> String {
+        let compactTitle = Self.compactWhitespace(chapterTitle)
+        var kept: [String] = []
+        for line in text.components(separatedBy: .newlines) {
+            var trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let regex = Self.pageMarkerRegex {
+                let range = NSRange(trimmed.startIndex..., in: trimmed)
+                trimmed = regex.stringByReplacingMatches(in: trimmed, range: range, withTemplate: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard !trimmed.isEmpty else {
+                kept.append("")
+                continue
+            }
+            if let regex = Self.pageHintRegex {
+                let range = NSRange(trimmed.startIndex..., in: trimmed)
+                if regex.firstMatch(in: trimmed, range: range) != nil { continue }
+            }
+            if !isFirstPage, !compactTitle.isEmpty, Self.compactWhitespace(trimmed) == compactTitle { continue }
+            kept.append(trimmed)
+        }
+        return kept.joined(separator: "\n")
+    }
+
+    private nonisolated static func compactWhitespace(_ text: String) -> String {
+        String(text.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) })
+    }
+
+    /// 找当前章的下一页：显式规则直接信任，启发式结果必须通过同章分页校验。
+    private func extractNextContentPageURL(from root: HTMLNode, currentPageURL: URL, firstPageURL: URL) -> URL? {
+        let rule = source.contentRule.nextContentURLSelector.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rule.isEmpty {
+            for candidate in HTMLMiniParser.queryStrings(root: root, rule: rule) {
+                let text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty,
+                      let url = resolveURL(text, relativeTo: currentPageURL.absoluteString) else { continue }
+                return url
+            }
+        }
+        for link in HTMLMiniParser.queryNodes(root: root, rule: "//a") {
+            let label = link.allText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !label.isEmpty, label.count <= 20 else { continue }
+            guard label.contains("下一页") || label.contains("下一节") || label.contains("本章未完") else { continue }
+            guard !label.contains("下一章"), !label.contains("下一篇") else { continue }
+            guard let href = link.get(attr: "href"),
+                  let candidate = resolveURL(href, relativeTo: currentPageURL.absoluteString),
+                  isSameChapterPage(candidate, firstPage: firstPageURL) else { continue }
+            return candidate
+        }
+        return nil
+    }
+
+    /// 启发式链接必须证明自己是同一章的下一页：同主机，且路径是首页 stem 的 `_2`/`-2`/`/2` 分页，或 query 带 `page=`。
+    private func isSameChapterPage(_ candidate: URL, firstPage: URL) -> Bool {
+        guard candidate.host?.lowercased() == firstPage.host?.lowercased() else { return false }
+        if (candidate.query ?? "").lowercased().contains("page=") { return true }
+        let (firstDir, firstStem) = Self.pathParts(of: firstPage)
+        let (candDir, candStem) = Self.pathParts(of: candidate)
+        if candDir == firstDir, candStem.hasPrefix(firstStem) {
+            let tail = candStem.dropFirst(firstStem.count)
+            if let head = tail.first, head == "_" || head == "-" {
+                let digits = tail.dropFirst()
+                return !digits.isEmpty && digits.allSatisfy { $0.isNumber }
+            }
+        }
+        if candDir == firstDir + firstStem + "/", !candStem.isEmpty, candStem.allSatisfy({ $0.isNumber }) {
+            return true
+        }
+        return false
+    }
+
+    /// 拆出目录与去后缀文件名：`/txt/100/500_2.html` -> `("/txt/100/", "500_2")`。
+    private nonisolated static func pathParts(of url: URL) -> (dir: String, stem: String) {
+        let path = url.path
+        guard let slash = path.lastIndex(of: "/") else { return ("", path) }
+        var file = String(path[path.index(after: slash)...])
+        for suffix in [".shtml", ".html", ".htm"] where file.lowercased().hasSuffix(suffix) {
+            file = String(file.dropLast(suffix.count))
+            break
+        }
+        return (String(path[...slash]), file)
     }
 
     /// 极简 JSONPath 导航：支持 $.a.b[0].c。字典段按 key 取，数组段按 [n] 取下标。
@@ -713,17 +902,14 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         url.path.range(of: #"/book/\d+\.htm$"#, options: .regularExpression) != nil
     }
 
-    private func chapterBody(from root: HTMLNode) -> String {
+    private func chapterRawText(from root: HTMLNode) -> String {
         let rule = source.contentRule.contentSelector
-        let raw: String
         if rule.contains("txtnav"),
            let nav = HTMLMiniParser.queryNodes(root: root, rule: ".txtnav").first {
-            raw = readableText(nav)
-        } else {
-            let selector = rule.isEmpty ? "//div[@id='content']/text()" : rule
-            raw = HTMLMiniParser.queryStrings(root: root, rule: selector).joined(separator: "\n\n")
+            return readableText(nav)
         }
-        return applyReplaceRules(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        let selector = rule.isEmpty ? "//div[@id='content']/text()" : rule
+        return HTMLMiniParser.queryStrings(root: root, rule: selector).joined(separator: "\n\n")
     }
 
     /// 正文容器里的标题、作者栏和右侧广告不算正文。
@@ -881,13 +1067,14 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
                 continue
             }
 
+            let meta = BookMetadataCleaner.clean(category: category, status: status)
             books.append(CatalogBook(
                 id: resolvedDetailURL.absoluteString,
                 title: title,
                 author: author,
                 summary: summary,
-                category: category.trimmingCharacters(in: .whitespacesAndNewlines),
-                status: status.trimmingCharacters(in: .whitespacesAndNewlines),
+                category: meta.category,
+                status: meta.status,
                 coverURL: coverURL,
                 latestChapter: LatestChapterLabel.clean(latestChapter)
             ))
@@ -1022,13 +1209,14 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
                 ?? (item["newChapter"] as? String)
                 ?? ""
 
+            let meta = BookMetadataCleaner.clean(category: category, status: status)
             books.append(CatalogBook(
                 id: id,
                 title: title,
                 author: author,
                 summary: summary,
-                category: category,
-                status: status,
+                category: meta.category,
+                status: meta.status,
                 coverURL: cover,
                 latestChapter: LatestChapterLabel.clean(latest)
             ))

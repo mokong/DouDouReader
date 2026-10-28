@@ -1633,7 +1633,13 @@ enum LogicChecks {
                 object.removeValue(forKey: "exploreRule")
                 if var toc = object["tocRule"] as? [String: Any] {
                     toc.removeValue(forKey: "startAtFirstChapter")
+                    toc.removeValue(forKey: "detailRequestTemplate")
                     object["tocRule"] = toc
+                }
+                if var content = object["contentRule"] as? [String: Any] {
+                    content.removeValue(forKey: "replaceRules")
+                    content.removeValue(forKey: "nextContentURLSelector")
+                    object["contentRule"] = content
                 }
                 let stripped = try JSONSerialization.data(withJSONObject: object)
                 let decoded = try JSONDecoder().decode(UniversalBookSource.self, from: stripped)
@@ -1642,6 +1648,12 @@ enum LogicChecks {
                 }
                 if decoded.tocRule.startAtFirstChapter {
                     errors.append("旧目录规则被当成从第1章开始")
+                }
+                if !decoded.tocRule.detailRequestTemplate.isEmpty || !decoded.contentRule.nextContentURLSelector.isEmpty {
+                    errors.append("旧正文/详情规则缺新字段时未回退默认值")
+                }
+                if !decoded.contentRule.replaceRules.isEmpty {
+                    errors.append("旧正文规则缺 replaceRules 时未回退空数组")
                 }
             } catch {
                 errors.append("旧书源 JSON 解码失败 \(error)")
@@ -3329,7 +3341,7 @@ enum LogicChecks {
             if res.searchCover != "https://cover.test/covers/77.jpg" {
                 errors.append("搜索懒加载封面未能跳过 nocover 占位图并取 data-original: \(res.searchCover)")
             }
-            if res.category != "科幻" || res.status != "连载" {
+            if res.category != "科幻" || res.status != "连载中" {
                 errors.append("搜索分类或连载状态提取不符: \(res.category) / \(res.status)")
             }
             if res.openingCover != "https://cover.test/img/77-hd.jpg" {
@@ -3381,6 +3393,199 @@ enum LogicChecks {
             }
         } catch {
             errors.append("EPUB 封面提取测试失败 \(error)")
+        }
+
+        // 5. 章节内分页自动拼接：提示语与重复标题剥离、下一章不误拼、回环终止、中间页失败宽容
+        let pagingOutcome = finishAsync { () -> (joined: String, loopGuard: String, partial: String, nextChapter: String) in
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [CatalogURLStub.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+
+            let source = UniversalBookSource(
+                kind: .legado,
+                name: "分页测试源",
+                sourceURL: "https://page.test",
+                tocRule: SourceTocRule(
+                    listSelector: "//div[@class='chapters']/a",
+                    nameSelector: "text",
+                    urlSelector: "href"
+                ),
+                contentRule: SourceContentRule(contentSelector: "//div[@id='content']/text()")
+            )
+            let catalog = RuleBasedBookCatalog(recordID: "paging-test", source: source, session: session)
+
+            let detail = """
+            <html><body><h1>分页测试书</h1><span class="author">测试者</span>
+            <div class="chapters"><a href="/book/99/c1.html">第1章 启航</a><a href="/book/99/c2.html">第2章 远行</a></div>
+            </body></html>
+            """
+            let page1 = """
+            <div id="content">第一章第一页正文。<br/>本章未完，请点击下一页继续阅读</div>
+            <div class="pager"><a href="/book/99/c2.html">下一章</a><a href="/book/99/c1_2.html">下一页</a></div>
+            """
+            let page2 = """
+            <div id="content">第1章 启航(第2/2页)<br/>第一章第二页正文。</div>
+            <div class="pager"><a href="/book/99/c2.html">下一章</a></div>
+            """
+            // 末页的「下一页」回指自己，必须被 visited 拦下
+            let page2Loop = page2.replacingOccurrences(
+                of: "<a href=\"/book/99/c2.html\">下一章</a>",
+                with: "<a href=\"/book/99/c1_2.html\">下一页</a>"
+            )
+            let chapter2 = "<div id=\"content\">第二章正文，独立成页。</div>"
+            let routes: [String: (Int, Data)] = [
+                "/book/99": (200, Data(detail.utf8)),
+                "/book/99/c1.html": (200, Data(page1.utf8)),
+                "/book/99/c1_2.html": (200, Data(page2.utf8)),
+                "/book/99/c2.html": (200, Data(chapter2.utf8))
+            ]
+            func with(_ override: (String, (Int, Data))) -> [String: (Int, Data)] {
+                var merged = routes
+                merged[override.0] = override.1
+                return merged
+            }
+
+            CatalogURLStub.setRoutes(routes)
+            let joined = try await catalog.fetchOpening(bookID: "/book/99").openingBody
+
+            CatalogURLStub.setRoutes(with(("/book/99/c1_2.html", (200, Data(page2Loop.utf8)))))
+            let loopGuard = try await catalog.fetchOpening(bookID: "/book/99").openingBody
+
+            CatalogURLStub.setRoutes(with(("/book/99/c1_2.html", (500, Data()))))
+            let partial = try await catalog.fetchOpening(bookID: "/book/99").openingBody
+
+            let next = try await catalog.fetchChapterText(url: "/book/99/c2.html")
+            return (joined, loopGuard, partial, next)
+        }
+        switch pagingOutcome {
+        case .failure(let error):
+            errors.append("分页章节拼接测试失败 \(error)")
+        case .success(let result):
+            if !result.joined.contains("第一章第一页正文。") || !result.joined.contains("第一章第二页正文。") {
+                errors.append("分页章节未自动拼接两页正文: \(result.joined)")
+            }
+            if result.joined.contains("本章未完") || result.joined.contains("第2/2页") || result.joined.contains("第1章 启航") {
+                errors.append("分页噪音（提示语/页码/重复标题）未剥离: \(result.joined)")
+            }
+            if result.joined.contains("第二章正文") {
+                errors.append("下一章被误拼进本章: \(result.joined)")
+            }
+            let page2Hits = result.loopGuard.components(separatedBy: "第一章第二页正文。").count - 1
+            if !result.loopGuard.contains("第一章第一页正文。") || page2Hits != 1 {
+                errors.append("分页回环未被 visited 终止（第二页出现 \(page2Hits) 次）: \(result.loopGuard)")
+            }
+            if !result.partial.contains("第一章第一页正文。") {
+                errors.append("中间页失败时未保留已抓到的正文: \(result.partial)")
+            }
+            if result.nextChapter.contains("第一章") {
+                errors.append("单独抓取下一章被分页逻辑污染: \(result.nextChapter)")
+            }
+        }
+
+        // 6. 香色 bookDetail.requestInfo 详情模板与 chapterContent.nextPageUrl 映射
+        let templateJSON = """
+        {
+          "sourceName": "香色模板测试",
+          "sourceUrl": "https://tpl.test",
+          "searchBook": { "requestInfo": "/s?q=%@keyWord", "list": "//li", "bookName": "//a/text()" },
+          "bookDetail": { "requestInfo": "/book/%@.html", "bookName": "//h1/text()" },
+          "chapterList": { "list": "//div[@class='chapters']/a", "title": "text", "url": "href" },
+          "chapterContent": { "content": "//div[@id='content']/text()", "nextPageUrl": "//a[@id='nextpage']/@href" }
+        }
+        """
+        do {
+            if let parsed = try BookSourceParser.parse(text: templateJSON).first {
+                if parsed.tocRule.detailRequestTemplate != "https://tpl.test/book/%@.html" {
+                    errors.append("bookDetail.requestInfo 未映射为详情模板: \(parsed.tocRule.detailRequestTemplate)")
+                }
+                if parsed.contentRule.nextContentURLSelector != "//a[@id='nextpage']/@href" {
+                    errors.append("chapterContent.nextPageUrl 未映射为分页选择器: \(parsed.contentRule.nextContentURLSelector)")
+                }
+            } else {
+                errors.append("香色模板源解析为空")
+            }
+        } catch {
+            errors.append("香色模板源解析失败 \(error)")
+        }
+
+        // 7. 纯书号按模板拼装详情页 + JSON 详情页目录提取
+        let detailOutcome = finishAsync { () -> (templateTitle: String, templateBody: String, jsonChapters: Int, jsonBody: String) in
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [CatalogURLStub.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+
+            let templateSource = UniversalBookSource(
+                kind: .xiangse,
+                name: "详情模板源",
+                sourceURL: "https://tpl.test",
+                tocRule: SourceTocRule(
+                    listSelector: "//div[@class='chapters']/a",
+                    nameSelector: "text",
+                    urlSelector: "href",
+                    detailRequestTemplate: "https://tpl.test/book/%@.html"
+                ),
+                contentRule: SourceContentRule(contentSelector: "//div[@id='content']/text()")
+            )
+            let jsonSource = UniversalBookSource(
+                kind: .legado,
+                name: "JSON详情源",
+                sourceURL: "https://json.test",
+                tocRule: SourceTocRule(listSelector: "$.data.chapters", nameSelector: "$.title", urlSelector: "$.url"),
+                contentRule: SourceContentRule(contentSelector: "//div[@id='content']/text()")
+            )
+            let templateDetail = """
+            <html><body><h1>模板拼装的书</h1><span class="author">拼装者</span>
+            <div class="chapters"><a href="/book/55/1.html">第一章</a></div>
+            </body></html>
+            """
+            let jsonDetail = """
+            {"data":{"chapters":[{"title":"第一章","url":"/book/88/1.html"},{"title":"第二章","url":"/book/88/2.html"}]}}
+            """
+            CatalogURLStub.setRoutes([
+                "/book/55.html": (200, Data(templateDetail.utf8)),
+                "/book/55/1.html": (200, Data("<div id=\"content\">模板拼装正文。</div>".utf8)),
+                "/book/88": (200, Data(jsonDetail.utf8)),
+                "/book/88/1.html": (200, Data("<div id=\"content\">JSON 详情第一章正文。</div>".utf8))
+            ])
+
+            let templateCatalog = RuleBasedBookCatalog(recordID: "tpl-test", source: templateSource, session: session)
+            let templateOpening = try await templateCatalog.fetchOpening(bookID: "55")
+
+            let jsonCatalog = RuleBasedBookCatalog(recordID: "json-test", source: jsonSource, session: session)
+            let jsonOpening = try await jsonCatalog.fetchOpening(bookID: "/book/88")
+
+            return (templateOpening.title, templateOpening.openingBody, jsonOpening.chapters.count, jsonOpening.openingBody)
+        }
+        switch detailOutcome {
+        case .failure(let error):
+            errors.append("详情模板与 JSON 详情测试失败 \(error)")
+        case .success(let result):
+            if result.templateTitle != "模板拼装的书" || !result.templateBody.contains("模板拼装正文。") {
+                errors.append("纯书号未按 detailRequestTemplate 拼装详情页: \(result.templateTitle) / \(result.templateBody)")
+            }
+            if result.jsonChapters != 2 || !result.jsonBody.contains("JSON 详情第一章正文。") {
+                errors.append("JSON 详情页目录未提取: \(result.jsonChapters) 章 / \(result.jsonBody)")
+            }
+        }
+
+        // 8. 分类与连载状态复合文本清洗
+        let bracketed = BookMetadataCleaner.clean(category: "[玄幻奇幻]", status: "")
+        if bracketed.category != "玄幻奇幻" || !bracketed.status.isEmpty {
+            errors.append("括号分类清洗不符: \(bracketed.category)/\(bracketed.status)")
+        }
+        let composite = BookMetadataCleaner.clean(category: "分类：仙侠 | 连载中", status: "")
+        if composite.category != "仙侠" || composite.status != "连载中" {
+            errors.append("复合分类未拆出连载状态: \(composite.category)/\(composite.status)")
+        }
+        let withWordCount = BookMetadataCleaner.clean(category: "玄幻 · 连载中 · 128万字", status: "")
+        if withWordCount.category != "玄幻" || withWordCount.status != "连载中" {
+            errors.append("含字数的复合分类清洗不符: \(withWordCount.category)/\(withWordCount.status)")
+        }
+        let explicitStatus = BookMetadataCleaner.clean(category: "都市", status: "状态：完结")
+        if explicitStatus.category != "都市" || explicitStatus.status != "完结" {
+            errors.append("显式状态归一不符: \(explicitStatus.category)/\(explicitStatus.status)")
         }
     }
 }
