@@ -3,6 +3,7 @@ import Observation
 
 enum PageTurnMode: String, Codable, CaseIterable, Identifiable {
     case curl
+    case cover
     case horizontal
     case vertical
     case none
@@ -12,9 +13,34 @@ enum PageTurnMode: String, Codable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .curl: "仿真"
+        case .cover: "覆盖"
         case .horizontal: "左右"
         case .vertical: "上下"
         case .none: "无"
+        }
+    }
+}
+
+enum SpacingPreset: String, CaseIterable, Identifiable {
+    case compact
+    case standard
+    case relaxed
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .compact: "紧凑"
+        case .standard: "适中"
+        case .relaxed: "宽松"
+        }
+    }
+
+    var values: (line: Double, paragraph: Double, marginX: Double, marginY: Double) {
+        switch self {
+        case .compact: (4, 8, 16, 2)
+        case .standard: (8, 14, 22, 4)
+        case .relaxed: (14, 22, 28, 10)
         }
     }
 }
@@ -243,13 +269,65 @@ final class ReaderSettingsStore {
         ReadingThemes.resolve(id: themeID, interfaceDark: interfaceDark)
     }
 
+    var activeSpacingPreset: SpacingPreset? {
+        for preset in SpacingPreset.allCases {
+            let v = preset.values
+            if abs(lineSpacing - v.line) < 0.5,
+               abs(paragraphSpacing - v.paragraph) < 0.5,
+               abs(horizontalMargin - v.marginX) < 0.5,
+               abs(topMargin - v.marginY) < 0.5,
+               abs(bottomMargin - v.marginY) < 0.5 {
+                return preset
+            }
+        }
+        return nil
+    }
+
+    func apply(preset: SpacingPreset) {
+        let v = preset.values
+        lineSpacing = v.line
+        paragraphSpacing = v.paragraph
+        horizontalMargin = v.marginX
+        topMargin = v.marginY
+        bottomMargin = v.marginY
+    }
+
+    func resetTypography() {
+        fontSize = 20
+        fontName = ""
+        lineSpacing = 8
+        paragraphSpacing = 14
+        indentChars = 2
+        horizontalMargin = 22
+        topMargin = 4
+        bottomMargin = 4
+        kern = 0
+        alignment = 0
+    }
+
+    func appendBlockWord(_ word: String) {
+        let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let existing = blockWords
+            .split { " ,，;；\n".contains($0) }
+            .map(String.init)
+        guard !existing.contains(trimmed) else { return }
+        if blockWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blockWords = trimmed
+        } else {
+            blockWords += "\n" + trimmed
+        }
+    }
+
     private func clamp() {
         fontSize = min(40, max(14, fontSize))
         lineSpacing = min(36, max(0, lineSpacing))
         paragraphSpacing = min(48, max(0, paragraphSpacing))
         indentChars = min(4, max(0, indentChars))
         horizontalMargin = min(56, max(12, horizontalMargin))
-        brightness = min(1, max(0.45, brightness))
+        topMargin = min(36, max(0, topMargin))
+        bottomMargin = min(36, max(0, bottomMargin))
+        brightness = min(1, max(0.15, brightness))
         autoInterval = min(30, max(3, autoInterval))
         speechRate = min(0.8, max(0.32, speechRate))
     }

@@ -273,6 +273,10 @@ struct ReaderScreen: View {
                         .padding(.bottom, safeBottom)
                         .background(theme.background.color)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if engine.speech.isActive {
+                    miniSpeechPill(engine, theme: theme)
+                        .padding(.bottom, safeBottom + 28)
+                        .transition(.scale(scale: 0.9).combined(with: .opacity))
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: engine.showsChrome)
@@ -371,7 +375,8 @@ struct ReaderScreen: View {
         .sheet(isPresented: $showSettings) {
             SettingsPanel(settings: settings)
                 #if os(iOS) || os(visionOS)
-                .presentationDetents([.fraction(0.55), .large])
+                .presentationDetents([.height(355), .large])
+                .presentationBackgroundInteraction(.enabled(upThrough: .height(355)))
                 .presentationDragIndicator(.visible)
                 #endif
         }
@@ -426,7 +431,17 @@ struct ReaderScreen: View {
     private func pageBody(_ engine: ReaderEngine, theme: ReadingTheme, safeTop: CGFloat, safeBottom: CGFloat) -> some View {
         let _ = engine.layoutRevision
         #if os(iOS) || os(visionOS)
-        ReaderContainer(engine: engine, settings: settings, theme: theme, safeTop: safeTop, safeBottom: safeBottom)
+        ReaderContainer(
+            engine: engine,
+            settings: settings,
+            theme: theme,
+            safeTop: safeTop,
+            safeBottom: safeBottom,
+            onSearchSelectedText: { query in
+                searchInitialQuery = query
+                showSearch = true
+            }
+        )
         #else
         MacPageView(
             engine: engine,
@@ -449,22 +464,34 @@ struct ReaderScreen: View {
         safeTop: CGFloat,
         safeBottom: CGFloat
     ) -> some View {
-        VStack(spacing: 0) {
+        let headerTitle: String = {
+            if engine.position.pageIndex == 0, !engine.isTerminal(engine.position), !book.title.isEmpty {
+                return book.title
+            }
+            return engine.currentTitle
+        }()
+        return VStack(spacing: 0) {
             if settings.showsHeader {
                 HStack(spacing: 8) {
                     if settings.showTime {
                         TimelineView(.periodic(from: .now, by: 30)) { timeline in
                             Text(ReaderClock.text(timeline.date))
+                                .monospacedDigit()
                         }
                     }
                     Spacer(minLength: 8)
                     if settings.showChapterTitle {
-                        Text(engine.currentTitle)
+                        Text(headerTitle)
                             .lineLimit(1)
                     }
                     Spacer(minLength: 8)
                     if settings.showBattery {
-                        Text(batteryText())
+                        HStack(spacing: 3) {
+                            Image(systemName: batterySymbol())
+                                .font(.system(size: 11))
+                            Text(batteryText())
+                                .monospacedDigit()
+                        }
                     }
                 }
                 .font(.system(size: 11))
@@ -565,6 +592,9 @@ struct ReaderScreen: View {
 
     private func bottomPanel(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
         VStack(spacing: 10) {
+            if engine.speech.isActive {
+                speechPlayerCard(engine, theme: theme)
+            }
             chapterScrubber(engine, theme: theme)
             HStack(spacing: 0) {
                 barButton("目录", systemImage: "list.bullet") { showCatalog = true }
@@ -593,6 +623,164 @@ struct ReaderScreen: View {
         .onChange(of: engine.position) { _, _ in
             guard !scrubbingChapter else { return }
             chapterScrub = Double(scrubIndex(engine))
+        }
+    }
+
+    /// 朗读激活且未展开工具栏时的右下角悬浮迷你听书胶囊（单点暂停/继续，长按或点展开调出完整控制栏）
+    private func miniSpeechPill(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
+        TimelineView(.periodic(from: .now, by: 1.0)) { timeline in
+            let _ = engine.speech.checkSleepDeadline(at: timeline.date)
+            HStack(spacing: 8) {
+                Button {
+                    engine.speech.togglePause()
+                } label: {
+                    Image(systemName: engine.speech.isPaused ? "play.fill" : "pause.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(width: 28, height: 28)
+                        .background(Color.accentColor.opacity(0.18), in: Circle())
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    engine.showsChrome = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 11))
+                        Text(engine.speech.isPaused ? "已暂停" : "听书中")
+                            .font(.caption.weight(.medium))
+                        if let remain = engine.speech.remainingSleepText(at: timeline.date) {
+                            Text(remain)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(theme.secondary.color)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    engine.toggleSpeech()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(theme.secondary.color)
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("退出朗读")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay {
+                Capsule().stroke(theme.secondary.color.opacity(0.22), lineWidth: 0.5)
+            }
+            .foregroundStyle(theme.text.color)
+            .shadow(color: .black.opacity(0.14), radius: 8, y: 3)
+        }
+    }
+
+    /// 香色闺阁风格的底部独立听书控制卡片（上一段/播放暂停/下一段、语速、音色、定时倒计时、退出）
+    private func speechPlayerCard(_ engine: ReaderEngine, theme: ReadingTheme) -> some View {
+        TimelineView(.periodic(from: .now, by: 1.0)) { timeline in
+            let _ = engine.speech.checkSleepDeadline(at: timeline.date)
+            VStack(spacing: 8) {
+                HStack(spacing: 12) {
+                    Button {
+                        engine.skipSpeech(delta: -1)
+                    } label: {
+                        Image(systemName: "backward.end.fill")
+                            .font(.system(size: 15))
+                            .frame(width: 34, height: 32)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("上一段")
+
+                    Button {
+                        engine.speech.togglePause()
+                    } label: {
+                        Image(systemName: engine.speech.isPaused ? "play.circle.fill" : "pause.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(engine.speech.isPaused ? "继续朗读" : "暂停朗读")
+
+                    Button {
+                        engine.skipSpeech(delta: 1)
+                    } label: {
+                        Image(systemName: "forward.end.fill")
+                            .font(.system(size: 15))
+                            .frame(width: 34, height: 32)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("下一段")
+
+                    Spacer(minLength: 4)
+
+                    // 语速快切菜单
+                    Menu {
+                        ForEach(ReaderEngine.SpeechRateMenu.options, id: \.self) { rate in
+                            Button {
+                                engine.applySpeechRate(rate)
+                            } label: {
+                                let marked = abs(engine.settings.speechRate - rate) < 0.005
+                                Label(ReaderEngine.SpeechRateMenu.label(rate), systemImage: marked ? "checkmark" : "")
+                            }
+                        }
+                    } label: {
+                        Text(ReaderEngine.SpeechRateMenu.label(engine.settings.speechRate))
+                            .font(.caption.monospacedDigit().weight(.medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(theme.secondary.color.opacity(0.14), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    // 定时关闭菜单（含实时倒计时）
+                    Menu {
+                        ForEach([0, 15, 30, 60, 90], id: \.self) { mins in
+                            Button {
+                                engine.applySpeechSleep(mins)
+                            } label: {
+                                Label(mins == 0 ? "关闭定时" : "\(mins) 分钟", systemImage: engine.settings.sleepMinutes == mins ? "checkmark" : "")
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "moon.zzz")
+                                .font(.system(size: 11))
+                            if let remain = engine.speech.remainingSleepText(at: timeline.date) {
+                                Text(remain)
+                                    .font(.caption.monospacedDigit())
+                            } else {
+                                Text("定时")
+                                    .font(.caption)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(theme.secondary.color.opacity(0.14), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        engine.toggleSpeech()
+                    } label: {
+                        Text("退出")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.red)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(Color.red.opacity(0.12), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(theme.secondary.color.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
 
@@ -1523,10 +1711,31 @@ struct ReaderScreen: View {
         #if os(iOS)
         UIDevice.current.isBatteryMonitoringEnabled = true
         let level = UIDevice.current.batteryLevel
-        guard level >= 0 else { return "—" }
+        guard level >= 0 else { return "100%" }
         return "\(Int((level * 100).rounded()))%"
         #else
-        return "—"
+        return "100%"
+        #endif
+    }
+
+    private func batterySymbol() -> String {
+        #if os(iOS)
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let state = UIDevice.current.batteryState
+        if state == .charging || state == .full {
+            return "battery.100.bolt"
+        }
+        let level = UIDevice.current.batteryLevel
+        guard level >= 0 else { return "battery.100" }
+        switch level {
+        case 0.85...: return "battery.100"
+        case 0.60..<0.85: return "battery.75"
+        case 0.35..<0.60: return "battery.50"
+        case 0.15..<0.35: return "battery.25"
+        default: return "battery.0"
+        }
+        #else
+        return "battery.100"
         #endif
     }
 }

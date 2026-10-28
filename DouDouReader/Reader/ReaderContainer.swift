@@ -9,9 +9,12 @@ struct ReaderContainer: UIViewControllerRepresentable {
     var theme: ReadingTheme
     var safeTop: CGFloat
     var safeBottom: CGFloat
+    var onSearchSelectedText: ((String) -> Void)? = nil
 
     func makeUIViewController(context: Context) -> ReaderPagesController {
-        ReaderPagesController(engine: engine, settings: settings)
+        let controller = ReaderPagesController(engine: engine, settings: settings)
+        controller.onSearchSelectedText = onSearchSelectedText
+        return controller
     }
 
     func updateUIViewController(_ controller: ReaderPagesController, context: Context) {
@@ -20,6 +23,7 @@ struct ReaderContainer: UIViewControllerRepresentable {
         controller.theme = theme
         controller.safeTop = safeTop
         controller.safeBottom = safeBottom
+        controller.onSearchSelectedText = onSearchSelectedText
         controller.sync()
     }
 }
@@ -30,6 +34,7 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
     var theme: ReadingTheme = ReadingThemes.paper
     var safeTop: CGFloat = 0
     var safeBottom: CGFloat = 0
+    var onSearchSelectedText: ((String) -> Void)?
 
     private var pageController: UIPageViewController?
     private var textRect: CGRect = .zero
@@ -152,8 +157,80 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         }
         flow.beginAnimated()
         armSettleWatchdog()
+        if effectiveMode == .cover {
+            performCoverTransition(to: targetVC, direction: direction, in: pageController)
+            return
+        }
         pageController.setViewControllers([targetVC], direction: direction, animated: true) { [weak self] _ in
             DispatchQueue.main.async { self?.finishAnimated() }
+        }
+    }
+
+    /// 香色闺阁同款「覆盖翻页」：前进时旧页带右侧立体阴影向左滑走、露出底下静止的新页；
+    /// 后退时上一页带阴影从左边缘滑入覆盖当前页。
+    private func performCoverTransition(
+        to targetVC: PageContentController,
+        direction: UIPageViewController.NavigationDirection,
+        in pageController: UIPageViewController
+    ) {
+        let host = pageController.view!
+        let width = max(host.bounds.width, 1)
+        let oldSnapshot = host.snapshotView(afterScreenUpdates: false)
+        pageController.setViewControllers([targetVC], direction: direction, animated: false, completion: nil)
+
+        guard let oldSnapshot else {
+            finishAnimated()
+            return
+        }
+
+        let shadowOverlay = UIView(frame: host.bounds)
+        shadowOverlay.isUserInteractionEnabled = false
+        oldSnapshot.frame = shadowOverlay.bounds
+        shadowOverlay.addSubview(oldSnapshot)
+        shadowOverlay.layer.shadowColor = UIColor.black.cgColor
+        shadowOverlay.layer.shadowOpacity = theme.isDark ? 0.48 : 0.22
+        shadowOverlay.layer.shadowRadius = 10
+        shadowOverlay.layer.shadowOffset = CGSize(width: 4, height: 0)
+        shadowOverlay.layer.shadowPath = UIBezierPath(rect: shadowOverlay.bounds).cgPath
+
+        if direction == .forward {
+            host.addSubview(shadowOverlay)
+            UIView.animate(
+                withDuration: 0.22,
+                delay: 0,
+                options: [.curveEaseOut, .beginFromCurrentState]
+            ) {
+                shadowOverlay.transform = CGAffineTransform(translationX: -width, y: 0)
+            } completion: { [weak self] _ in
+                shadowOverlay.removeFromSuperview()
+                self?.finishAnimated()
+            }
+        } else {
+            // 反向覆盖：新页从左侧滑入，底下垫旧页快照
+            guard let newSnapshot = host.snapshotView(afterScreenUpdates: true) else {
+                finishAnimated()
+                return
+            }
+            oldSnapshot.removeFromSuperview()
+            oldSnapshot.frame = host.bounds
+            host.addSubview(oldSnapshot)
+
+            shadowOverlay.addSubview(newSnapshot)
+            newSnapshot.frame = shadowOverlay.bounds
+            shadowOverlay.transform = CGAffineTransform(translationX: -width, y: 0)
+            host.addSubview(shadowOverlay)
+
+            UIView.animate(
+                withDuration: 0.22,
+                delay: 0,
+                options: [.curveEaseOut, .beginFromCurrentState]
+            ) {
+                shadowOverlay.transform = .identity
+            } completion: { [weak self] _ in
+                oldSnapshot.removeFromSuperview()
+                shadowOverlay.removeFromSuperview()
+                self?.finishAnimated()
+            }
         }
     }
 
@@ -448,7 +525,7 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
     private func installTap() {
         guard let host = pageController?.view else { return }
         host.gestureRecognizers?
-            .filter { $0.name == "readerTap" }
+            .filter { $0.name == "readerTap" || $0.name == "readerLongPress" }
             .forEach { host.removeGestureRecognizer($0) }
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         tap.name = "readerTap"
@@ -457,6 +534,14 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         // 不再让 tap 等待 UIPageViewController 的滑动/拖拽手势失败。
         // 手指抬起即可 0 延迟响应翻页或唤出菜单；若手指产生位移滑动，系统会自动将 Tap 判定为失效。
         host.addGestureRecognizer(tap)
+
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        longPress.name = "readerLongPress"
+        longPress.minimumPressDuration = 0.45
+        longPress.cancelsTouchesInView = true
+        host.addGestureRecognizer(longPress)
+        tap.require(toFail: longPress)
+
         linkedGestureCount = pageController?.gestureRecognizers.count ?? 0
     }
 
@@ -465,7 +550,7 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         pageController?.gestureRecognizers.forEach { gesture in
             if gesture is UITapGestureRecognizer {
                 gesture.isEnabled = false
-            } else if gesture.name != "readerTap" {
+            } else if gesture.name != "readerTap" && gesture.name != "readerLongPress" {
                 gesture.isEnabled = paging
             }
         }
@@ -491,6 +576,36 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         let width = max(view.bounds.width, 1)
         engine.handleTap(xFraction: gesture.location(in: view).x / width)
         sync()
+    }
+
+    @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        guard let visible = pageController?.viewControllers?.first as? PageContentController else { return }
+        let pointInPage = gesture.location(in: visible.view)
+        guard let hit = visible.sentenceAt(pointInPage: pointInPage) else { return }
+        visible.setHighlight(hit.range, color: highlightColor)
+        let preview = hit.text.count > 26 ? String(hit.text.prefix(26)) + "…" : hit.text
+        let sheet = UIAlertController(title: "选中句子", message: "「\(preview)」", preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "复制句子", style: .default) { [weak visible, weak self] _ in
+            UIPasteboard.general.string = hit.text
+            visible?.setHighlight(self?.engine.highlightRange, color: self?.highlightColor ?? .clear)
+        })
+        sheet.addAction(UIAlertAction(title: "在书中搜索", style: .default) { [weak visible, weak self] _ in
+            visible?.setHighlight(self?.engine.highlightRange, color: self?.highlightColor ?? .clear)
+            self?.onSearchSelectedText?(hit.text)
+        })
+        sheet.addAction(UIAlertAction(title: "净化此句广告词", style: .destructive) { [weak visible, weak self] _ in
+            visible?.setHighlight(self?.engine.highlightRange, color: self?.highlightColor ?? .clear)
+            self?.settings.appendBlockWord(hit.text)
+        })
+        sheet.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak visible, weak self] _ in
+            visible?.setHighlight(self?.engine.highlightRange, color: self?.highlightColor ?? .clear)
+        })
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = visible.view
+            popover.sourceRect = CGRect(origin: pointInPage, size: CGSize(width: 2, height: 2))
+        }
+        present(sheet, animated: true)
     }
 }
 
@@ -568,6 +683,55 @@ final class PageContentController: UIViewController {
         canvas.chapterLayout = layout
         canvas.pageIndex = position.pageIndex
         apply(textRect: textRect, theme: theme, fontName: fontName)
+    }
+
+    /// 根据长按坐标定位所在句子范围与纯文本。
+    func sentenceAt(pointInPage: CGPoint) -> (range: NSRange, text: String)? {
+        guard !terminal,
+              textRect.contains(pointInPage),
+              let chapterLayout = canvas.chapterLayout,
+              chapterLayout.containers.indices.contains(position.pageIndex),
+              chapterLayout.characterRanges.indices.contains(position.pageIndex) else { return nil }
+        let container = chapterLayout.containers[position.pageIndex]
+        let pageRange = chapterLayout.characterRanges[position.pageIndex]
+        let glyphs = chapterLayout.layoutManager.glyphRange(for: container)
+        guard glyphs.length > 0 else { return nil }
+        let firstFragment = chapterLayout.layoutManager.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+        let localPoint = CGPoint(
+            x: pointInPage.x - textRect.minX,
+            y: pointInPage.y - textRect.minY + (abs(firstFragment.minY) > 0.5 ? firstFragment.minY : 0)
+        )
+        let charIdx = chapterLayout.layoutManager.characterIndex(
+            for: localPoint,
+            in: container,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+        guard NSLocationInRange(charIdx, pageRange) else { return nil }
+        let ns = chapterLayout.storage.string as NSString
+        let delimiters = CharacterSet(charactersIn: "。！？；\n.!?;")
+        var start = charIdx
+        while start > pageRange.location {
+            let prev = ns.character(at: start - 1)
+            if let scalar = UnicodeScalar(prev), delimiters.contains(scalar) {
+                break
+            }
+            start -= 1
+        }
+        var end = charIdx
+        let maxEnd = NSMaxRange(pageRange)
+        while end < maxEnd {
+            let curr = ns.character(at: end)
+            if let scalar = UnicodeScalar(curr), delimiters.contains(scalar) {
+                if curr != 10 { end += 1 } // 包含句末标点，不包含换行
+                break
+            }
+            end += 1
+        }
+        guard end > start else { return nil }
+        let range = NSRange(location: start, length: end - start)
+        let text = ns.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return (range, text)
     }
 }
 

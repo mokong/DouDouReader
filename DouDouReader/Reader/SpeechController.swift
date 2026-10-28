@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import MediaPlayer
 import ObjectiveC
 
 private nonisolated(unsafe) var speechEpochKey: UInt8 = 0
@@ -9,15 +10,19 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     nonisolated(unsafe) private let synthesizer = AVSpeechSynthesizer()
     private var queue: [String] = []
     private var advance: Advance = .none
-    private var deadline: Date?
+    private(set) var deadline: Date?
     private var speakingRate: Float = AVSpeechUtteranceDefaultSpeechRate
     private var speakingVoiceID: String = ""
     private var epoch = 0
+    private var nowPlayingTitle: String = ""
+    private var nowPlayingChapter: String = ""
+    private var remoteCommandsInstalled = false
 
     var isActive = false
     var isPaused = false
     var onRange: ((NSRange) -> Void)?
     var onAdvance: ((Advance) -> Void)?
+    var onRemoteSkip: ((Int) -> Void)?
     /// 朗读被系统音频中断（来电、其他 App 抢占）开始时的 UI 回调，主线程派发，仅在朗读活跃时触发。
     /// ReaderScreen 据此弹「朗读被中断」确认窗；默认 nil，由 UI 层注入。
     var onInterruptionBegan: (@MainActor () -> Void)?
@@ -48,7 +53,8 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     func start(parts: [String], mode: SpeechReadMode, rate: Float, voiceID: String, sleepMinutes: Int, highlight: Bool) {
-        stop()
+        let existingDeadline = deadline
+        stop(preserveDeadline: true)
         let pieces = parts.flatMap { chunk($0) }.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard let first = pieces.first else { return }
         queue = Array(pieces.dropFirst())
@@ -57,23 +63,30 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         speakingVoiceID = voiceID
         isActive = true
         isPaused = false
-        if sleepMinutes > 0 {
+        if let existingDeadline, existingDeadline > Date() {
+            deadline = existingDeadline
+        } else if sleepMinutes > 0 {
             deadline = Date().addingTimeInterval(TimeInterval(sleepMinutes * 60))
         } else {
             deadline = nil
         }
         _ = highlight
         prepareAudio()
+        installRemoteCommandsIfNeeded()
+        publishNowPlaying()
         speak(first)
     }
 
-    func stop() {
+    func stop(preserveDeadline: Bool = false) {
         epoch += 1
         queue.removeAll()
         advance = .none
         isActive = false
         isPaused = false
-        deadline = nil
+        if !preserveDeadline {
+            deadline = nil
+            clearNowPlaying()
+        }
         synthesizer.stopSpeaking(at: .immediate)
         onRange?(NSRange(location: 0, length: 0))
     }
@@ -87,6 +100,90 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
             synthesizer.pauseSpeaking(at: .word)
             isPaused = true
         }
+        publishNowPlaying()
+    }
+
+    func updateSleepTimer(minutes: Int) {
+        if minutes > 0 {
+            deadline = Date().addingTimeInterval(TimeInterval(minutes * 60))
+        } else {
+            deadline = nil
+        }
+    }
+
+    func checkSleepDeadline(at now: Date = Date()) {
+        guard isActive else { return }
+        _ = expired(at: now)
+    }
+
+    func remainingSleepText(at now: Date = Date()) -> String? {
+        guard let deadline else { return nil }
+        let remaining = Int(deadline.timeIntervalSince(now).rounded(.up))
+        guard remaining > 0 else { return nil }
+        let mins = remaining / 60
+        let secs = remaining % 60
+        return String(format: "%02d:%02d", mins, secs)
+    }
+
+    func updateNowPlaying(bookTitle: String, chapterTitle: String) {
+        nowPlayingTitle = bookTitle
+        nowPlayingChapter = chapterTitle
+        if isActive {
+            publishNowPlaying()
+        }
+    }
+
+    private func installRemoteCommandsIfNeeded() {
+        guard !remoteCommandsInstalled else { return }
+        remoteCommandsInstalled = true
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.isEnabled = true
+        center.playCommand.addTarget { [weak self] _ in
+            guard let self, self.isActive else { return .commandFailed }
+            if self.isPaused { self.togglePause() }
+            return .success
+        }
+        center.pauseCommand.isEnabled = true
+        center.pauseCommand.addTarget { [weak self] _ in
+            guard let self, self.isActive else { return .commandFailed }
+            if !self.isPaused { self.togglePause() }
+            return .success
+        }
+        center.togglePlayPauseCommand.isEnabled = true
+        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self, self.isActive else { return .commandFailed }
+            self.togglePause()
+            return .success
+        }
+        center.nextTrackCommand.isEnabled = true
+        center.nextTrackCommand.addTarget { [weak self] _ in
+            guard let self, self.isActive else { return .commandFailed }
+            self.onRemoteSkip?(1)
+            return .success
+        }
+        center.previousTrackCommand.isEnabled = true
+        center.previousTrackCommand.addTarget { [weak self] _ in
+            guard let self, self.isActive else { return .commandFailed }
+            self.onRemoteSkip?(-1)
+            return .success
+        }
+    }
+
+    private func publishNowPlaying() {
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: nowPlayingChapter.isEmpty ? "正在朗读" : nowPlayingChapter,
+            MPMediaItemPropertyArtist: nowPlayingTitle.isEmpty ? "豆豆阅读" : nowPlayingTitle,
+            MPNowPlayingInfoPropertyPlaybackRate: isPaused ? 0.0 : 1.0
+        ]
+        if let deadline {
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            info[MPMediaItemPropertyPlaybackDuration] = remaining
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func clearNowPlaying() {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
     private func speak(_ text: String) {
@@ -196,8 +293,8 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         prepareAudio()
     }
 
-    private func expired() -> Bool {
-        if let deadline, Date() >= deadline {
+    private func expired(at now: Date = Date()) -> Bool {
+        if let deadline, now >= deadline {
             stop()
             return true
         }

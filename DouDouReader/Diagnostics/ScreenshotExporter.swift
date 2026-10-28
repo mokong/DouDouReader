@@ -210,40 +210,46 @@ enum ScreenshotExporter {
         let theme = ReadingThemes.paper
         let view = PhoneFrame(title: "正文") {
             VStack(spacing: 0) {
-                // 页眉状态
+                // 页眉状态（章节首页显示书名，避免与下方大标题重复）
                 HStack {
                     Text("09:41")
+                        .monospacedDigit()
                     Spacer()
-                    Text("第一章 雨夜的信封")
+                    Text("灯塔邮局")
                         .lineLimit(1)
                     Spacer()
                     HStack(spacing: 3) {
                         Image(systemName: "battery.75")
                         Text("75%")
+                            .monospacedDigit()
                     }
                 }
                 .font(.system(size: 11))
                 .foregroundStyle(theme.secondary.color)
                 .padding(.horizontal, 24)
                 .padding(.top, 10)
-                .padding(.bottom, 12)
+                .padding(.bottom, 10)
 
-                // 正文排版
-                VStack(alignment: .leading, spacing: 14) {
+                // 正文排版（fixedSize 确保每段完整换行不产生省略号截断）
+                VStack(alignment: .leading, spacing: 12) {
                     Text("第一章 雨夜的信封")
-                        .font(.system(size: 22, weight: .bold))
+                        .font(.system(size: 21, weight: .bold))
                         .foregroundStyle(theme.text.color)
                         .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 6)
-                        .padding(.bottom, 10)
+                        .padding(.top, 4)
+                        .padding(.bottom, 8)
 
                     Text("\u{3000}\u{3000}那一夜雨很大，邮船没有靠岸。林书正准备关窗，石阶上却多了一只铁盒。盒盖用红线绑着，线是干的，雨却已经下了两个时辰。她在门口站了一会儿，确认不是哪条船把邮袋扔早了。")
+                        .fixedSize(horizontal: false, vertical: true)
                     Text("\u{3000}\u{3000}她把铁盒抱进柜台。里面只有一封信，信封正面写着给还在开灯的人。没有邮票，没有落款，纸却是新的。新得不像从海里来，倒像有人刚刚在灯下写完，顺手放到了雨够不着的地方。")
+                        .fixedSize(horizontal: false, vertical: true)
                     Text("\u{3000}\u{3000}林书把信举到灯下。墨迹没有晕开。她读了第一行，又把它放回桌上，好像多看一眼就会把别人的句子看成自己的。第一行只是请她把灯再留一夜，没有解释为什么。")
-                    Text("\u{3000}\u{3000}窗外的灯把雨丝照成细细的金线。她在登记簿上写下雨夜，无名信，地址未完成。写到未完成三个字的时候，笔尖顿了一下。她忽然觉得这间邮局一直都在等这样一封信，等一句还没写完的地址。")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("\u{3000}\u{3000}窗外的灯把雨丝照成细细的金线。她在登记簿上写下雨夜，无名信，地址未完成。写到未完成三个字时，笔尖顿了一下，忽然觉得这间邮局一直在等这样一封信。")
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .font(.system(size: 17, weight: .regular, design: .serif))
-                .lineSpacing(7)
+                .font(.system(size: 16.5, weight: .regular, design: .serif))
+                .lineSpacing(6)
                 .foregroundStyle(theme.text.color)
                 .padding(.horizontal, 24)
 

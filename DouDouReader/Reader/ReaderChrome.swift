@@ -12,128 +12,39 @@ extension RGBA {
 struct SettingsPanel: View {
     @Bindable var settings: ReaderSettingsStore
     @Environment(\.dismiss) private var dismiss
+    @State private var activeTab: Tab = .typography
+    @State private var showFineSpacing = false
     @State private var importingFont = false
     @State private var fontMessage: String?
     @State private var speechVoices = SpeechController.chineseVoices()
 
+    enum Tab: String, CaseIterable, Identifiable {
+        case typography = "排版"
+        case pageAndChrome = "翻页与界面"
+        case speechAndPurify = "听书与净化"
+        var id: String { rawValue }
+    }
+
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("字体") {
-                    Picker("字体", selection: $settings.fontName) {
-                        ForEach(FontRegistry.available(current: settings.fontName)) { face in
-                            Text(face.displayName).tag(face.postScriptName)
-                        }
-                    }
-                    Button("导入字体") { importingFont = true }
-                    fontSizeRow()
-                    labeledSlider("行距", value: $settings.lineSpacing, range: 0...36, step: 1, text: "\(Int(settings.lineSpacing.rounded()))")
-                    labeledSlider("段距", value: $settings.paragraphSpacing, range: 0...48, step: 1, text: "\(Int(settings.paragraphSpacing.rounded()))")
-                    Stepper("首行缩进 \(settings.indentChars)", value: $settings.indentChars, in: 0...4)
-                    labeledSlider("字距", value: $settings.kern, range: -1...3, step: 0.5, text: String(format: "%.1f", settings.kern))
-                    choiceRow("对齐") {
-                        ChoiceButtons(
-                            options: TextAlignmentChoice.allCases.map { ($0.title, $0) },
-                            selection: settings.alignmentChoice
-                        ) { settings.alignmentChoice = $0 }
-                    }
-                    labeledSlider("左右边距", value: $settings.horizontalMargin, range: 12...56, step: 1, text: "\(Int(settings.horizontalMargin.rounded()))")
-                }
-                Section("主题") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            Button("自动") { settings.themeID = "auto" }
-                                .buttonStyle(.bordered)
-                                .tint(settings.themeID == "auto" ? Color.accentColor : Color.secondary)
-                            ForEach(ReadingThemes.choices) { theme in
-                                Button {
-                                    settings.themeID = theme.id
-                                } label: {
-                                    Circle()
-                                        .fill(theme.background.color)
-                                        .overlay {
-                                            Circle().stroke(
-                                                settings.themeID == theme.id ? Color.accentColor : Color.primary.opacity(0.15),
-                                                lineWidth: 2
-                                            )
-                                        }
-                                        .frame(width: 28, height: 28)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(theme.name)
-                            }
-                        }
-                    }
-                    labeledSlider("亮度", value: $settings.brightness, range: 0.45...1, step: 0.01, text: "\(Int(settings.brightness * 100))%")
-                }
-                Section("翻页") {
-                    choiceRow("方式") {
-                        ChoiceButtons(
-                            options: PageTurnMode.allCases.map { ($0.title, $0) },
-                            selection: settings.pageMode
-                        ) { settings.pageMode = $0 }
-                    }
-                    choiceRow("简繁") {
-                        ChoiceButtons(
-                            options: ChineseScript.allCases.map { ($0.title, $0) },
-                            selection: settings.script
-                        ) { settings.script = $0 }
-                    }
-                    labeledSlider("自动间隔", value: $settings.autoInterval, range: 3...30, step: 1, text: "\(Int(settings.autoInterval.rounded())) 秒")
-                    choiceRow("边缘返回") {
-                        ChoiceButtons(
-                            options: PopGestureMode.allCases.map { ($0.title, $0) },
-                            selection: settings.popGesture
-                        ) { settings.popGesture = $0 }
-                    }
-                    Toggle("屏幕常亮", isOn: $settings.keepScreenOn)
-                }
-                Section("页眉页脚") {
-                    Toggle("时间", isOn: $settings.showTime)
-                    Toggle("电量", isOn: $settings.showBattery)
-                    Toggle("章节名", isOn: $settings.showChapterTitle)
-                    Toggle("页码", isOn: $settings.showPageProgress)
-                    Toggle("全书进度", isOn: $settings.showBookPercent)
-                }
-                Section("朗读") {
-                    labeledSlider("语速", value: $settings.speechRate, range: 0.32...0.8, step: 0.01, text: String(format: "%.2f", settings.speechRate))
-                    Picker("音色", selection: $settings.speechVoiceID) {
-                        Text("系统默认").tag("")
-                        ForEach(speechVoices, id: \.identifier) { voice in
-                            Text("\(voice.name)（\(voice.language)）").tag(voice.identifier)
-                        }
-                    }
-                    choiceRow("方式") {
-                        ChoiceButtons(
-                            options: SpeechReadMode.allCases.map { ($0.title, $0) },
-                            selection: settings.speechMode
-                        ) { settings.speechMode = $0 }
-                    }
-                    Picker("定时关闭", selection: $settings.sleepMinutes) {
-                        Text("关").tag(0)
-                        Text("20 分钟").tag(20)
-                        Text("30 分钟").tag(30)
-                        Text("60 分钟").tag(60)
-                        Text("90 分钟").tag(90)
+        VStack(spacing: 0) {
+            headerBar
+            Divider().opacity(0.4)
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    switch activeTab {
+                    case .typography:
+                        typographySection
+                    case .pageAndChrome:
+                        pageAndChromeSection
+                    case .speechAndPurify:
+                        speechAndPurifySection
                     }
                 }
-                Section {
-                    TextField("屏蔽词", text: $settings.blockWords, axis: .vertical)
-                        .lineLimit(2...4)
-                } header: {
-                    Text("屏蔽词")
-                } footer: {
-                    Text("用空格、逗号或换行隔开。包含这些词的段落不会显示。")
-                }
-            }
-            .navigationTitle("设置")
-            #if os(iOS) || os(visionOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                Button("完成") { dismiss() }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
             }
         }
+        .background(.regularMaterial)
         .fileImporter(isPresented: $importingFont, allowedContentTypes: fontTypes, allowsMultipleSelection: false) { result in
             switch result {
             case .failure:
@@ -156,6 +67,406 @@ struct SettingsPanel: View {
         }
     }
 
+    private var headerBar: some View {
+        HStack(spacing: 12) {
+            Picker("设置分类", selection: $activeTab) {
+                ForEach(Tab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Button("完成") { dismiss() }
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
+    }
+
+    // MARK: - Tab 1: 排版与主题（香色闺阁紧凑实时预览风格）
+    private var typographySection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // 1. 亮度调节条
+            HStack(spacing: 10) {
+                Image(systemName: "sun.min")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Slider(value: $settings.brightness, in: 0.15...1.0, step: 0.01)
+                Image(systemName: "sun.max.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("\(Int((settings.brightness * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, alignment: .trailing)
+            }
+
+            // 2. 香色经典护眼色卡横排
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    themeAutomaticChip
+                    ForEach(ReadingThemes.choices) { theme in
+                        themeSwatchChip(theme)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            // 3. 字号微调 + 简繁快切
+            HStack(spacing: 10) {
+                Button {
+                    if settings.fontSize > 14 { settings.fontSize -= 1 }
+                } label: {
+                    Text("A-")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 38, height: 32)
+                        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(settings.fontSize <= 14)
+
+                HStack(spacing: 6) {
+                    Slider(value: $settings.fontSize, in: 14...36, step: 1)
+                    Text("\(Int(settings.fontSize.rounded()))")
+                        .font(.caption.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22)
+                }
+
+                Button {
+                    if settings.fontSize < 36 { settings.fontSize += 1 }
+                } label: {
+                    Text("A+")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 38, height: 32)
+                        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(settings.fontSize >= 36)
+
+                Divider().frame(height: 20)
+
+                HStack(spacing: 4) {
+                    ForEach(ChineseScript.allCases) { script in
+                        let selected = settings.script == script
+                        Button(script.title) {
+                            settings.script = script
+                        }
+                        .font(.caption.weight(selected ? .semibold : .regular))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(
+                            selected ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06),
+                            in: RoundedRectangle(cornerRadius: 7)
+                        )
+                        .foregroundStyle(selected ? Color.accentColor : Color.primary)
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            // 4. 字体横向胶囊 + 导入字体
+            HStack(spacing: 8) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(FontRegistry.available(current: settings.fontName)) { face in
+                            let selected = settings.fontName == face.postScriptName
+                            Button {
+                                settings.fontName = face.postScriptName
+                            } label: {
+                                Text(face.displayName)
+                                    .font(.caption.weight(selected ? .semibold : .regular))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        selected ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06),
+                                        in: Capsule()
+                                    )
+                                    .foregroundStyle(selected ? Color.accentColor : Color.primary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                Button {
+                    importingFont = true
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "plus.circle")
+                        Text("导入")
+                    }
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.07), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+
+            // 5. 间距预设档位 + 展开微调 + 恢复默认
+            HStack(spacing: 8) {
+                Text("间距")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(SpacingPreset.allCases) { preset in
+                    let active = settings.activeSpacingPreset == preset
+                    Button(preset.title) {
+                        settings.apply(preset: preset)
+                    }
+                    .font(.caption.weight(active ? .semibold : .regular))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        active ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06),
+                        in: Capsule()
+                    )
+                    .foregroundStyle(active ? Color.accentColor : Color.primary)
+                    .buttonStyle(.plain)
+                }
+                Spacer(minLength: 4)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        showFineSpacing.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text("更多排版")
+                        Image(systemName: showFineSpacing ? "chevron.up" : "chevron.down")
+                    }
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+
+                Button("重置") {
+                    settings.resetTypography()
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
+            }
+
+            if showFineSpacing {
+                VStack(spacing: 10) {
+                    compactSlider("行距", value: $settings.lineSpacing, range: 0...36, step: 1, text: "\(Int(settings.lineSpacing.rounded()))")
+                    compactSlider("段距", value: $settings.paragraphSpacing, range: 0...48, step: 1, text: "\(Int(settings.paragraphSpacing.rounded()))")
+                    compactSlider("左右边距", value: $settings.horizontalMargin, range: 12...56, step: 1, text: "\(Int(settings.horizontalMargin.rounded()))")
+                    compactSlider(
+                        "上下边距",
+                        value: Binding(
+                            get: { settings.topMargin },
+                            set: {
+                                settings.topMargin = $0
+                                settings.bottomMargin = $0
+                            }
+                        ),
+                        range: 0...36,
+                        step: 1,
+                        text: "\(Int(settings.topMargin.rounded()))"
+                    )
+                    compactSlider("字距", value: $settings.kern, range: -1...3, step: 0.5, text: String(format: "%.1f", settings.kern))
+                    HStack {
+                        Text("首行缩进")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Stepper("\(settings.indentChars) 格", value: $settings.indentChars, in: 0...4)
+                            .font(.caption.monospacedDigit())
+                    }
+                    HStack {
+                        Text("对齐方式")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        ChoiceButtons(
+                            options: TextAlignmentChoice.allCases.map { ($0.title, $0) },
+                            selection: settings.alignmentChoice
+                        ) { settings.alignmentChoice = $0 }
+                    }
+                }
+                .padding(12)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    private var themeAutomaticChip: some View {
+        let selected = settings.themeID == "auto"
+        return Button {
+            settings.themeID = "auto"
+        } label: {
+            Text("自动")
+                .font(.caption.weight(selected ? .semibold : .regular))
+                .frame(width: 44, height: 32)
+                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(selected ? Color.accentColor : Color.primary.opacity(0.15), lineWidth: selected ? 2 : 1)
+                }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func themeSwatchChip(_ theme: ReadingTheme) -> some View {
+        let selected = settings.themeID == theme.id
+        return Button {
+            settings.themeID = theme.id
+        } label: {
+            Text(theme.name)
+                .font(.caption.weight(selected ? .semibold : .regular))
+                .foregroundStyle(theme.text.color)
+                .frame(width: 46, height: 32)
+                .background(theme.background.color, in: RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(selected ? Color.accentColor : Color.primary.opacity(0.15), lineWidth: selected ? 2 : 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(theme.name)
+    }
+
+    // MARK: - Tab 2: 翻页与界面
+    private var pageAndChromeSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("翻页动画")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ChoiceButtons(
+                    options: PageTurnMode.allCases.map { ($0.title, $0) },
+                    selection: settings.pageMode
+                ) { settings.pageMode = $0 }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("页眉与页脚挂件")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    toggleChip("时间", isOn: $settings.showTime)
+                    toggleChip("电量", isOn: $settings.showBattery)
+                    toggleChip("章节名", isOn: $settings.showChapterTitle)
+                    toggleChip("页码", isOn: $settings.showPageProgress)
+                    toggleChip("进度%", isOn: $settings.showBookPercent)
+                }
+            }
+
+            compactSlider(
+                "自动翻页间隔",
+                value: $settings.autoInterval,
+                range: 3...30,
+                step: 1,
+                text: "\(Int(settings.autoInterval.rounded())) 秒"
+            )
+
+            HStack {
+                Text("左边缘返回手势")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                ChoiceButtons(
+                    options: PopGestureMode.allCases.map { ($0.title, $0) },
+                    selection: settings.popGesture
+                ) { settings.popGesture = $0 }
+            }
+
+            Toggle("阅读时屏幕常亮", isOn: $settings.keepScreenOn)
+                .font(.subheadline)
+        }
+    }
+
+    private func toggleChip(_ title: String, isOn: Binding<Bool>) -> some View {
+        let active = isOn.wrappedValue
+        return Button {
+            isOn.wrappedValue.toggle()
+        } label: {
+            Text(title)
+                .font(.caption.weight(active ? .semibold : .regular))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(
+                    active ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .foregroundStyle(active ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Tab 3: 听书与净化
+    private var speechAndPurifySection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            compactSlider(
+                "朗读语速",
+                value: $settings.speechRate,
+                range: 0.32...0.8,
+                step: 0.01,
+                text: String(format: "%.2fx", settings.speechRate)
+            )
+
+            HStack {
+                Text("中文发音人")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Picker("音色", selection: $settings.speechVoiceID) {
+                    Text("系统默认").tag("")
+                    ForEach(speechVoices, id: \.identifier) { voice in
+                        Text("\(voice.name)（\(voice.language)）").tag(voice.identifier)
+                    }
+                }
+                .labelsHidden()
+            }
+
+            HStack {
+                Text("朗读粒度")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                ChoiceButtons(
+                    options: SpeechReadMode.allCases.map { ($0.title, $0) },
+                    selection: settings.speechMode
+                ) { settings.speechMode = $0 }
+            }
+
+            HStack {
+                Text("定时关闭")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Picker("定时关闭", selection: $settings.sleepMinutes) {
+                    Text("关").tag(0)
+                    Text("20 分钟").tag(20)
+                    Text("30 分钟").tag(30)
+                    Text("60 分钟").tag(60)
+                    Text("90 分钟").tag(90)
+                }
+                .labelsHidden()
+            }
+
+            Divider().opacity(0.4)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("正文净化与替换规则")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                TextField("输入屏蔽词，或使用 原词=>替换词 精准替换", text: $settings.blockWords, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(2...4)
+                    .font(.caption)
+                Text("用换行、逗号或分号分隔。短句广告整行剔除；长文段内水印自动抹除不删段；支持 原词=>替换词 与 re:正则=>替换。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var fontPresented: Binding<Bool> {
         Binding(get: { fontMessage != nil }, set: { if !$0 { fontMessage = nil } })
     }
@@ -167,62 +478,23 @@ struct SettingsPanel: View {
         return types
     }
 
-    private func fontSizeRow() -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("字号")
-                Spacer()
-                Text("\(Int(settings.fontSize.rounded()))")
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            HStack(spacing: 12) {
-                Button {
-                    if settings.fontSize > 14 { settings.fontSize -= 1 }
-                } label: {
-                    Image(systemName: "textformat.size.smaller")
-                        .frame(width: 32, height: 28)
-                }
-                .buttonStyle(.bordered)
-                .disabled(settings.fontSize <= 14)
-
-                Slider(value: $settings.fontSize, in: 14...36, step: 1)
-
-                Button {
-                    if settings.fontSize < 36 { settings.fontSize += 1 }
-                } label: {
-                    Image(systemName: "textformat.size.larger")
-                        .frame(width: 32, height: 28)
-                }
-                .buttonStyle(.bordered)
-                .disabled(settings.fontSize >= 36)
-            }
-        }
-    }
-
-    private func labeledSlider(
+    private func compactSlider(
         _ title: String,
         value: Binding<Double>,
         range: ClosedRange<Double>,
         step: Double,
         text: String
     ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(text)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            Slider(value: value, in: range, step: step)
-        }
-    }
-
-    private func choiceRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        HStack(spacing: 10) {
             Text(title)
-            content()
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 64, alignment: .leading)
+            Slider(value: value, in: range, step: step)
+            Text(text)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .trailing)
         }
     }
 }

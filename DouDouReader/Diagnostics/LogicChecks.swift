@@ -976,9 +976,25 @@ enum LogicChecks {
     }
 
     private static func checkBlockWords(_ errors: inout [String]) {
+        // 1. 短句独立广告行应整行剔除
         let filtered = ChapterTextBuilder.plainParagraphs("甲\n这是广告句\n乙", blockWords: "广告")
         if filtered != "甲\n乙" {
             errors.append("屏蔽词没有去掉整段：\(filtered)")
+        }
+        // 2. 长正文段落内嵌站点水印应只抹除水印及残留空括号，不误删整段小说正文
+        let longLine = "林书把信举到灯下，墨迹没有晕开，她读了第一行又把它放回桌上，好像多看一眼就会把别人的句子看成自己的（请记住本站域名）。"
+        let purifiedLong = ChapterTextBuilder.plainParagraphs(longLine, blockWords: "请记住本站域名")
+        let expectedLong = "林书把信举到灯下，墨迹没有晕开，她读了第一行又把它放回桌上，好像多看一眼就会把别人的句子看成自己的。"
+        if purifiedLong != expectedLong {
+            errors.append("长段内嵌屏蔽词应当只抹除水印并保留正文：\(purifiedLong)")
+        }
+        // 3. 支持 原词=>替换词 与 re:正则=>替换
+        let replaced = ChapterTextBuilder.plainParagraphs(
+            "他走进大厅www.test123.com坐下，看着错别字。",
+            blockWords: "re:www\\.[a-z0-9]+\\.com=>, 错别字=>正字"
+        )
+        if replaced != "他走进大厅坐下，看着正字。" {
+            errors.append("替换与正则净化规则未生效：\(replaced)")
         }
     }
 
@@ -3113,7 +3129,7 @@ enum LogicChecks {
         if PageTurnFlow.programmaticAnimationAllowed(for: .none) {
             errors.append("翻页调度: 「无」模式不应播动画")
         }
-        for mode in [PageTurnMode.horizontal, .vertical] where !PageTurnFlow.programmaticAnimationAllowed(for: mode) {
+        for mode in [PageTurnMode.cover, .horizontal, .vertical] where !PageTurnFlow.programmaticAnimationAllowed(for: mode) {
             errors.append("翻页调度: \(mode.rawValue) 模式程序化翻页应播动画")
         }
     }
@@ -3164,6 +3180,18 @@ enum LogicChecks {
         }
         if !ReaderEngine.SpeechRateMenu.label(0.48).hasSuffix("x") {
             errors.append("朗读语速: 标签格式不符 \(ReaderEngine.SpeechRateMenu.label(0.48))")
+        }
+        let store = ReaderSettingsStore(loadSaved: false)
+        store.apply(preset: .compact)
+        if store.activeSpacingPreset != .compact {
+            errors.append("间距预设: 紧凑档位未命中")
+        }
+        store.resetTypography()
+        if store.activeSpacingPreset != .standard || store.fontSize != 20 {
+            errors.append("排版重置: 未回到默认适中档位")
+        }
+        if ReadingThemes.choices.count < 8 {
+            errors.append("阅读主题: 香色色板数量不足 \(ReadingThemes.choices.count)")
         }
     }
 }

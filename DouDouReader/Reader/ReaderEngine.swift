@@ -145,6 +145,9 @@ final class ReaderEngine {
         speech.onRange = { [weak self] range in
             self?.handleSpeechRange(range)
         }
+        speech.onRemoteSkip = { [weak self] delta in
+            self?.skipSpeech(delta: delta)
+        }
     }
 
     var totalUTF16: Int { sourceText.length }
@@ -572,6 +575,12 @@ final class ReaderEngine {
         settings.speechVoiceID = voiceID
         guard speech.isActive else { return }
         restartCurrentSpeechSegment()
+    }
+
+    /// 朗读中热改定时关闭：实时更新倒计时截止时刻，不打断当前正在朗读的句子。
+    func applySpeechSleep(_ minutes: Int) {
+        settings.sleepMinutes = minutes
+        speech.updateSleepTimer(minutes: minutes)
     }
 
     private func restartCurrentSpeechSegment() {
@@ -1110,6 +1119,7 @@ final class ReaderEngine {
         } else {
             speakingPageRange = nil
         }
+        speech.updateNowPlaying(bookTitle: "", chapterTitle: currentTitle)
         speech.start(
             parts: [text],
             mode: .page,
@@ -1135,6 +1145,7 @@ final class ReaderEngine {
         )
         let title = ChineseConverter.convert(chapter.title, to: script)
         let spoken = body.isEmpty ? title : title + "。\n" + body
+        speech.updateNowPlaying(bookTitle: "", chapterTitle: title)
         speech.start(
             parts: [spoken],
             mode: .chapter,
