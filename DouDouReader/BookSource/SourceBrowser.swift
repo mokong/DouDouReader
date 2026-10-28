@@ -417,7 +417,7 @@ struct SourceBrowserView: View {
         coverURL: String = ""
     ) -> some View {
         Button {
-            Task { await openOrDownloadBook(title: title, author: author, bookID: bookID) }
+            Task { await openOrDownloadBook(title: title, author: author, bookID: bookID, coverURL: coverURL) }
         } label: {
             HStack(alignment: .top, spacing: 14) {
                 // 左侧封面图（艺术阴影与右上红角标）
@@ -643,7 +643,7 @@ struct SourceBrowserView: View {
         }
     }
 
-    private func openOrDownloadBook(title: String, author: String, bookID: String) async {
+    private func openOrDownloadBook(title: String, author: String, bookID: String, coverURL: String = "") async {
         addingID = bookID
         status = "正在读取第一章..."
         defer {
@@ -654,6 +654,11 @@ struct SourceBrowserView: View {
         }
 
         if let existing = BookLibrary.existingRemote(bookID: bookID, context: modelContext) {
+            if existing.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                existing.coverURL = coverURL
+                try? modelContext.save()
+            }
             onOpen(existing.id)
             return
         }
@@ -666,6 +671,7 @@ struct SourceBrowserView: View {
         do {
             let opening = try await catalog.fetchOpening(bookID: bookID)
             let importedTitle = opening.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedCover = opening.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? coverURL : opening.coverURL
             let imported = try BookLibrary.importOnline(
                 text: opening.text,
                 suggestedTitle: importedTitle.isEmpty ? title : importedTitle,
@@ -674,6 +680,7 @@ struct SourceBrowserView: View {
                 remoteSourceID: selectedEntry?.id ?? "",
                 chapters: opening.chapters,
                 openingBody: opening.openingBody,
+                coverURL: resolvedCover,
                 context: modelContext
             )
             let listedAuthor = author.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -925,19 +932,10 @@ struct NovelCoverView: View {
                     }
                 )
                 .overlay(
-                    Group {
-                        if let url = URL(string: coverURL) {
-                            AsyncImage(url: url) { phase in
-                                if let image = phase.image {
-                                    image.resizable().scaledToFill()
-                                } else {
-                                    titleOverlay
-                                }
-                            }
-                        } else {
-                            titleOverlay
-                        }
+                    BookCoverImageView(coverURL: coverURL) {
+                        titleOverlay
                     }
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
                 )
 
             // 右上角红底白字小角标（如 "10万"、"完本"、"精选"）

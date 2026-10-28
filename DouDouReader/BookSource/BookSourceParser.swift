@@ -189,6 +189,7 @@ enum BookSourceParser {
             searchRule.summarySelector = (ruleSearch["intro"] as? String) ?? (ruleSearch["summary"] as? String) ?? ""
             searchRule.coverSelector = (ruleSearch["coverUrl"] as? String) ?? (ruleSearch["cover"] as? String) ?? ""
             searchRule.lastChapterSelector = (ruleSearch["lastChapter"] as? String) ?? ""
+            searchRule.categorySelector = (ruleSearch["kind"] as? String) ?? (ruleSearch["category"] as? String) ?? ""
         }
 
         // 目录规则
@@ -197,6 +198,7 @@ enum BookSourceParser {
             tocRule.tocURLSelector = (ruleBookInfo["tocUrl"] as? String) ?? ""
             tocRule.infoNameSelector = (ruleBookInfo["name"] as? String) ?? ""
             tocRule.infoAuthorSelector = (ruleBookInfo["author"] as? String) ?? ""
+            tocRule.infoCoverSelector = (ruleBookInfo["coverUrl"] as? String) ?? (ruleBookInfo["cover"] as? String) ?? ""
         }
         if let ruleToc = dict["ruleToc"] as? [String: Any] {
             tocRule.listSelector = ruleToc["chapterList"] as? String ?? ""
@@ -229,6 +231,7 @@ enum BookSourceParser {
             exploreRule.detailURLSelector = (ruleExplore["bookUrl"] as? String) ?? (ruleExplore["bookURL"] as? String) ?? ""
             exploreRule.summarySelector = (ruleExplore["intro"] as? String) ?? (ruleExplore["summary"] as? String) ?? ""
             exploreRule.coverSelector = (ruleExplore["coverUrl"] as? String) ?? (ruleExplore["cover"] as? String) ?? ""
+            exploreRule.categorySelector = (ruleExplore["kind"] as? String) ?? (ruleExplore["category"] as? String) ?? ""
         }
 
         let rawJSON = (try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]))
@@ -318,25 +321,50 @@ enum BookSourceParser {
             searchRule.authorSelector = searchAction["author"] as? String ?? ""
             searchRule.detailURLSelector = (searchAction["detailUrl"] as? String) ?? (searchAction["url"] as? String) ?? ""
             searchRule.summarySelector = (searchAction["desc"] as? String) ?? (searchAction["intro"] as? String) ?? ""
-            searchRule.coverSelector = searchAction["cover"] as? String ?? ""
+            searchRule.coverSelector = (searchAction["cover"] as? String) ?? (searchAction["coverUrl"] as? String) ?? ""
             searchRule.lastChapterSelector = (searchAction["lastChapter"] as? String)
                 ?? (searchAction["latestChapter"] as? String)
                 ?? (searchAction["newChapter"] as? String)
                 ?? ""
+            searchRule.categorySelector = (searchAction["cat"] as? String)
+                ?? (searchAction["category"] as? String)
+                ?? (searchAction["kind"] as? String)
+                ?? ""
+            searchRule.statusSelector = (searchAction["status"] as? String) ?? ""
         }
 
-        // 目录规则 chapterList
+        // 详情与目录规则 bookDetail + chapterList
         var tocRule = SourceTocRule()
+        if let detailAction = dict["bookDetail"] as? [String: Any] {
+            tocRule.infoNameSelector = (detailAction["bookName"] as? String) ?? (detailAction["title"] as? String) ?? ""
+            tocRule.infoAuthorSelector = (detailAction["author"] as? String) ?? ""
+            tocRule.infoCoverSelector = (detailAction["cover"] as? String) ?? (detailAction["coverUrl"] as? String) ?? ""
+            tocRule.tocURLSelector = (detailAction["tocUrl"] as? String) ?? (detailAction["chapterUrl"] as? String) ?? ""
+        }
         if let chapterAction = dict["chapterList"] as? [String: Any] {
             tocRule.listSelector = chapterAction["list"] as? String ?? ""
             tocRule.nameSelector = chapterAction["title"] as? String ?? ""
             tocRule.urlSelector = (chapterAction["url"] as? String) ?? (chapterAction["detailUrl"] as? String) ?? ""
+            if tocRule.tocURLSelector.isEmpty,
+               let reqInfo = chapterAction["requestInfo"] as? String,
+               !reqInfo.contains("%@") && !reqInfo.contains("@js:") {
+                tocRule.tocURLSelector = reqInfo
+            }
         }
 
         // 正文规则 chapterContent
         var contentRule = SourceContentRule()
         if let contentAction = dict["chapterContent"] as? [String: Any] {
             contentRule.contentSelector = contentAction["content"] as? String ?? ""
+            if let replaceStr = (contentAction["replace"] as? String) ?? (contentAction["purify"] as? String),
+               !replaceStr.isEmpty {
+                contentRule.replaceRules = replaceStr
+                    .components(separatedBy: .newlines)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            } else if let replaceArr = (contentAction["replace"] as? [String]) ?? (contentAction["purify"] as? [String]) {
+                contentRule.replaceRules = replaceArr.filter { !$0.isEmpty }
+            }
         }
 
         // 发现规则 findBook：香色闺阁切换站点后用它渲染频道、筛选和书单
@@ -350,7 +378,12 @@ enum BookSourceParser {
             exploreRule.authorSelector = findAction["author"] as? String ?? ""
             exploreRule.detailURLSelector = (findAction["detailUrl"] as? String) ?? (findAction["url"] as? String) ?? ""
             exploreRule.summarySelector = (findAction["desc"] as? String) ?? (findAction["intro"] as? String) ?? ""
-            exploreRule.coverSelector = findAction["cover"] as? String ?? ""
+            exploreRule.coverSelector = (findAction["cover"] as? String) ?? (findAction["coverUrl"] as? String) ?? ""
+            exploreRule.categorySelector = (findAction["cat"] as? String)
+                ?? (findAction["category"] as? String)
+                ?? (findAction["kind"] as? String)
+                ?? ""
+            exploreRule.statusSelector = (findAction["status"] as? String) ?? ""
         }
 
         let rawJSON = (try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]))

@@ -4,6 +4,7 @@ nonisolated struct ParsedEpub: Sendable {
     var title: String
     var author: String
     var text: String
+    var coverData: Data? = nil
 }
 
 nonisolated enum EpubParseError: LocalizedError {
@@ -113,7 +114,71 @@ nonisolated enum EpubParser {
         let text = render(chapters)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw EpubParseError.empty }
         guard text.utf8.count <= byteLimit else { throw EpubParseError.tooLarge }
-        return ParsedEpub(title: title, author: author, text: text)
+        let coverData = extractCoverData(package, manifest: manifest, encrypted: encrypted, archive: archive)
+        return ParsedEpub(title: title, author: author, text: text, coverData: coverData)
+    }
+
+    private static func extractCoverData(
+        _ package: Markup.Node,
+        manifest: [String: ManifestItem],
+        encrypted: Set<String>,
+        archive: ZipArchive
+    ) -> Data? {
+        let coverLimit = 8 * 1024 * 1024
+        var candidates: [ManifestItem] = []
+
+        // 1. EPUB 3 标准：properties="cover-image"
+        for item in manifest.values where isImageItem(item) && isCoverProperty(item) {
+            candidates.append(item)
+        }
+
+        // 2. EPUB 2 标准：<meta name="cover" content="cover-id"/>
+        for meta in package.elements(named: "meta") {
+            guard (meta.attribute("name") ?? "").caseInsensitiveCompare("cover") == .orderedSame,
+                  let content = meta.attribute("content")?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !content.isEmpty else { continue }
+            if let item = manifest[content], isImageItem(item) {
+                candidates.append(item)
+            } else if let byPath = manifest.values.first(where: { isImageItem($0) && $0.path.hasSuffix(content) }) {
+                candidates.append(byPath)
+            }
+        }
+
+        // 3. 常见 ID 或文件名回退（cover / cover-image / cover.jpg / cover.png）
+        for key in ["cover", "cover-image", "cover_img", "coverimage"] {
+            if let item = manifest[key], isImageItem(item) {
+                candidates.append(item)
+            }
+        }
+        for item in manifest.values where isImageItem(item) {
+            let filename = (item.path as NSString).lastPathComponent.lowercased()
+            if filename.hasPrefix("cover.") || filename.contains("cover") {
+                candidates.append(item)
+            }
+        }
+
+        var tried = Set<String>()
+        for item in candidates {
+            guard tried.insert(item.path).inserted, !encrypted.contains(item.path) else { continue }
+            if let data = try? archive.file(item.path), !data.isEmpty, data.count <= coverLimit {
+                return data
+            }
+        }
+        return nil
+    }
+
+    private static func isImageItem(_ item: ManifestItem) -> Bool {
+        if item.mediaType.hasPrefix("image/") && !item.mediaType.contains("svg") {
+            return true
+        }
+        let ext = (item.path as NSString).pathExtension.lowercased()
+        return ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "webp" || ext == "gif"
+    }
+
+    private static func isCoverProperty(_ item: ManifestItem) -> Bool {
+        item.properties.split(whereSeparator: \.isWhitespace).contains {
+            $0.caseInsensitiveCompare("cover-image") == .orderedSame
+        }
     }
 
     private static func appendChapters(

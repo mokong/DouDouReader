@@ -71,10 +71,31 @@ enum BookStorage {
     }
 
     nonisolated static var booksDirectory: URL { directory("Books") }
+    nonisolated static var coversDirectory: URL { directory("Covers") }
     static var fontsDirectory: URL { directory("Fonts") }
 
     nonisolated static func fileURL(_ fileName: String) -> URL {
         booksDirectory.appendingPathComponent(fileName)
+    }
+
+    nonisolated static func coverFileURL(_ fileName: String) -> URL {
+        let stem = (fileName as NSString).deletingPathExtension
+        return coversDirectory.appendingPathComponent("\(stem).cover")
+    }
+
+    nonisolated static func writeCover(_ data: Data, for fileName: String) {
+        guard !fileName.isEmpty, !data.isEmpty else { return }
+        try? data.write(to: coverFileURL(fileName), options: .atomic)
+    }
+
+    nonisolated static func readCover(fileName: String) -> Data? {
+        guard !fileName.isEmpty else { return nil }
+        return try? Data(contentsOf: coverFileURL(fileName))
+    }
+
+    nonisolated static func hasCover(fileName: String) -> Bool {
+        guard !fileName.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: coverFileURL(fileName).path)
     }
 
     static func write(_ text: String) throws -> String {
@@ -96,6 +117,7 @@ enum BookStorage {
 
     static func delete(fileName: String) {
         try? FileManager.default.removeItem(at: fileURL(fileName))
+        try? FileManager.default.removeItem(at: coverFileURL(fileName))
         StoredChapters.delete(fileName: fileName)
     }
 
@@ -441,7 +463,15 @@ enum BookLibrary {
             let book = try EpubParser.parse(data)
             let trimmed = book.title.trimmingCharacters(in: .whitespacesAndNewlines)
             let suggested = trimmed.isEmpty ? BookMetadata.title(from: url.lastPathComponent) : trimmed
-            return try importText(book.text, suggestedTitle: suggested, author: book.author, context: context)
+            let imported = try importText(book.text, suggestedTitle: suggested, author: book.author, context: context)
+            if let coverData = book.coverData, !coverData.isEmpty {
+                BookStorage.writeCover(coverData, for: imported.book.fileName)
+                if imported.book.coverURL.isEmpty {
+                    imported.book.coverURL = "local://\(imported.book.fileName)"
+                    try? context.save()
+                }
+            }
+            return imported
         }
         guard let decoded = TextDecoding.decode(data) else { throw ImportError.unreadableEncoding }
         return try importText(
@@ -475,9 +505,15 @@ enum BookLibrary {
         remoteSourceID: String,
         chapters: [RemoteChapterRef],
         openingBody: String = "",
+        coverURL: String = "",
         context: ModelContext
     ) throws -> ImportedBook {
+        let resolvedCover = coverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if let existing = existingRemote(bookID: remoteBookID, context: context) {
+            if existing.coverURL.isEmpty && !resolvedCover.isEmpty {
+                existing.coverURL = resolvedCover
+                try? context.save()
+            }
             return ImportedBook(book: existing, isNew: false)
         }
         let text = TextDecoding.normalize(raw)
@@ -491,6 +527,7 @@ enum BookLibrary {
             try adoptSource(
                 existing,
                 author: resolvedAuthor,
+                coverURL: resolvedCover,
                 remoteBookID: remoteBookID,
                 remoteSourceID: remoteSourceID,
                 chapters: chapters,
@@ -525,6 +562,7 @@ enum BookLibrary {
             coverHue: BookMetadata.coverHue(for: title),
             totalUTF16: (fileText as NSString).length
         )
+        book.coverURL = resolvedCover
         book.remoteBookID = remoteBookID
         book.remoteSourceID = remoteSourceID
         book.remoteChapterList = RemoteChapterList.encode(chapters)
@@ -538,6 +576,7 @@ enum BookLibrary {
     static func adoptSource(
         _ book: BookRecord,
         author: String,
+        coverURL: String = "",
         remoteBookID: String,
         remoteSourceID: String,
         chapters: [RemoteChapterRef],
@@ -571,6 +610,10 @@ enum BookLibrary {
         book.loadedChapterCount = merged.count
         book.totalUTF16 = (assembled as NSString).length
         book.contentHash = hash(assembled)
+        let trimmedCover = coverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedCover.isEmpty, book.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            book.coverURL = trimmedCover
+        }
         let named = author.trimmingCharacters(in: .whitespacesAndNewlines)
         if book.author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !named.isEmpty, named != "未知作者" {
             book.author = named
@@ -621,6 +664,10 @@ enum BookLibrary {
     private static func keepLatest(_ group: [BookRecord], context: ModelContext) throws {
         guard group.count > 1 else { return }
         let kept = group.max { $0.lastReadAt < $1.lastReadAt }
+        if let kept, kept.coverURL.isEmpty,
+           let fallbackCover = group.first(where: { !$0.coverURL.isEmpty })?.coverURL {
+            kept.coverURL = fallbackCover
+        }
         for book in group where book.id != kept?.id {
             try delete(book, context: context)
         }

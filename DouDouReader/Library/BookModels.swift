@@ -13,6 +13,8 @@ final class BookRecord {
     var isPinned: Bool = false
     var groupName: String = "默认"
     var coverHue: Double = 0.08
+    /// 封面图片地址（可为远端 http/https 地址，若本地已缓存或 EPUB 提取则优先读 Covers 目录）。
+    var coverURL: String = ""
     var chapterIndex: Int = 0
     var utf16Offset: Int = 0
     var totalUTF16: Int = 0

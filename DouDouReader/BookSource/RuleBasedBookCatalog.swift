@@ -122,7 +122,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             author: prepared.author,
             text: text,
             chapters: refs,
-            openingBody: body
+            openingBody: body,
+            coverURL: prepared.coverURL
         )
     }
 
@@ -132,7 +133,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         return OnlineTOC(
             title: prepared.title,
             author: prepared.author,
-            chapters: prepared.chapters.map { RemoteChapterRef(title: $0.title, url: $0.url.absoluteString) }
+            chapters: prepared.chapters.map { RemoteChapterRef(title: $0.title, url: $0.url.absoluteString) },
+            coverURL: prepared.coverURL
         )
     }
 
@@ -150,6 +152,7 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
     private struct PreparedBook {
         var title: String
         var author: String
+        var coverURL: String
         var chapters: [(title: String, url: URL)]
     }
 
@@ -172,9 +175,10 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             ?? "未知书名"
         let authorRule = source.tocRule.infoAuthorSelector.isEmpty ? "//span[@class='author']/text()" : source.tocRule.infoAuthorSelector
         let author = HTMLMiniParser.queryStrings(root: detailRoot, rule: authorRule).first ?? ""
+        let coverURL = extractDetailCoverURL(from: detailRoot, baseURL: bookURL)
         let chapters = try await loadChapterList(bookURL: bookURL, detailRoot: detailRoot)
         guard !chapters.isEmpty else { throw SourceError.emptyBook }
-        return PreparedBook(title: title, author: author, chapters: chapters)
+        return PreparedBook(title: title, author: author, coverURL: coverURL, chapters: chapters)
     }
 
     private func downloadChapter(_ url: URL) async throws -> String {
@@ -795,6 +799,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
         var summary: String
         var cover: String
         var lastChapter: String
+        var category: String
+        var status: String
     }
 
     private func searchFieldSelectors() -> FieldSelectors {
@@ -805,7 +811,9 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             detail: source.searchRule.detailURLSelector,
             summary: source.searchRule.summarySelector,
             cover: source.searchRule.coverSelector,
-            lastChapter: source.searchRule.lastChapterSelector
+            lastChapter: source.searchRule.lastChapterSelector,
+            category: source.searchRule.categorySelector,
+            status: source.searchRule.statusSelector
         )
     }
 
@@ -820,7 +828,9 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             detail: pick(source.exploreRule.detailURLSelector, source.searchRule.detailURLSelector),
             summary: pick(source.exploreRule.summarySelector, source.searchRule.summarySelector),
             cover: pick(source.exploreRule.coverSelector, source.searchRule.coverSelector),
-            lastChapter: source.searchRule.lastChapterSelector
+            lastChapter: source.searchRule.lastChapterSelector,
+            category: pick(source.exploreRule.categorySelector, source.searchRule.categorySelector),
+            status: pick(source.exploreRule.statusSelector, source.searchRule.statusSelector)
         )
     }
 
@@ -853,14 +863,16 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             ).first
             let detailHref = node.nearestHref(preferred: queriedHref) ?? ""
 
-            let coverRaw = HTMLMiniParser.queryStrings(
-                root: node,
-                rule: selectors.cover.isEmpty ? "//img/@src" : selectors.cover
-            ).first ?? ""
-            let coverURL = (try? resolveURL(coverRaw, relativeTo: baseURL.absoluteString))?.absoluteString ?? ""
+            let coverURL = extractCoverURL(from: node, selector: selectors.cover, baseURL: baseURL)
             let latestChapter = selectors.lastChapter.isEmpty
                 ? ""
                 : (HTMLMiniParser.queryStrings(root: node, rule: selectors.lastChapter).first ?? "")
+            let category = selectors.category.isEmpty
+                ? ""
+                : (HTMLMiniParser.queryStrings(root: node, rule: selectors.category).first ?? "")
+            let status = selectors.status.isEmpty
+                ? ""
+                : (HTMLMiniParser.queryStrings(root: node, rule: selectors.status).first ?? "")
 
             guard !title.isEmpty, let resolvedDetailURL = resolveURL(detailHref, relativeTo: baseURL.absoluteString) else {
                 continue
@@ -874,12 +886,94 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
                 title: title,
                 author: author,
                 summary: summary,
+                category: category.trimmingCharacters(in: .whitespacesAndNewlines),
+                status: status.trimmingCharacters(in: .whitespacesAndNewlines),
                 coverURL: coverURL,
                 latestChapter: LatestChapterLabel.clean(latestChapter)
             ))
         }
 
         return books
+    }
+
+    /// 提取列表项封面图：优先使用书源规则，其次兼容图片懒加载属性（data-original / data-src / data-lazy），并过滤站点的无封面占位图。
+    private func extractCoverURL(from node: HTMLNode, selector: String, baseURL: URL) -> String {
+        var candidates: [String] = []
+        if !selector.isEmpty {
+            candidates.append(contentsOf: HTMLMiniParser.queryStrings(root: node, rule: selector))
+        }
+        let fallbackRules = [
+            "//img/@data-original",
+            "//img/@data-src",
+            "//img/@data-lazy",
+            "//img/@data-echo",
+            "//img/@src"
+        ]
+        for rule in fallbackRules {
+            candidates.append(contentsOf: HTMLMiniParser.queryStrings(root: node, rule: rule))
+        }
+        for raw in candidates {
+            if let valid = validatedCoverURL(raw, relativeTo: baseURL) {
+                return valid
+            }
+        }
+        return ""
+    }
+
+    /// 提取详情页封面图：优先使用 infoCoverSelector，其次尝试 OpenGraph og:image 与常见封面容器。
+    private func extractDetailCoverURL(from root: HTMLNode, baseURL: URL) -> String {
+        var candidates: [String] = []
+        if !source.tocRule.infoCoverSelector.isEmpty {
+            candidates.append(contentsOf: HTMLMiniParser.queryStrings(root: root, rule: source.tocRule.infoCoverSelector))
+        }
+        let detailFallbackRules = [
+            "//meta[@property='og:image']/@content",
+            "//div[@id='fmimg']//img/@data-original",
+            "//div[@id='fmimg']//img/@data-src",
+            "//div[@id='fmimg']//img/@src",
+            "//div[@class='bookimg']//img/@data-original",
+            "//div[@class='bookimg']//img/@data-src",
+            "//div[@class='bookimg']//img/@src",
+            "//div[@class='booknav2']//img/@src",
+            "//div[@class='cover']//img/@data-original",
+            "//div[@class='cover']//img/@data-src",
+            "//div[@class='cover']//img/@src"
+        ]
+        for rule in detailFallbackRules {
+            candidates.append(contentsOf: HTMLMiniParser.queryStrings(root: root, rule: rule))
+        }
+        for raw in candidates {
+            if let valid = validatedCoverURL(raw, relativeTo: baseURL) {
+                return valid
+            }
+        }
+        return ""
+    }
+
+    private func validatedCoverURL(_ raw: String, relativeTo baseURL: URL) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !Self.isPlaceholderCover(trimmed) else { return nil }
+        guard let resolved = resolveURL(trimmed, relativeTo: baseURL.absoluteString) else { return nil }
+        let abs = resolved.absoluteString
+        guard !Self.isPlaceholderCover(abs) else { return nil }
+        return abs
+    }
+
+    nonisolated static func isPlaceholderCover(_ urlString: String) -> Bool {
+        let lower = urlString.lowercased()
+        if lower.hasPrefix("javascript:") || lower.hasPrefix("data:image/gif") || lower.hasPrefix("about:") {
+            return true
+        }
+        let placeholders = [
+            "nocover", "no-cover", "no_cover", "noimg", "no-img", "no_img",
+            "nopic", "no-pic", "no_pic", "default.jpg", "default.png",
+            "default_cover", "default-cover", "defaultcover", "none.gif",
+            "blank.gif", "loading.gif", "lazy.gif", "/s.gif"
+        ]
+        for token in placeholders where lower.contains(token) {
+            return true
+        }
+        return false
     }
 
     private func tryParseJSONSearchResults(_ text: String) -> [CatalogBook]? {
@@ -919,7 +1013,10 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
             let title = (item["title"] as? String) ?? (item["name"] as? String) ?? (item["bookName"] as? String) ?? "未命名"
             let author = (item["author"] as? String) ?? ""
             let summary = (item["summary"] as? String) ?? (item["desc"] as? String) ?? (item["intro"] as? String) ?? ""
-            let cover = (item["cover"] as? String) ?? (item["coverUrl"] as? String) ?? (item["coverURL"] as? String) ?? (item["img"] as? String) ?? (item["coverImage"] as? String) ?? ""
+            let rawCover = (item["cover"] as? String) ?? (item["coverUrl"] as? String) ?? (item["coverURL"] as? String) ?? (item["img"] as? String) ?? (item["coverImage"] as? String) ?? ""
+            let cover = Self.isPlaceholderCover(rawCover) ? "" : (resolveURL(rawCover, relativeTo: source.sourceURL)?.absoluteString ?? rawCover)
+            let category = (item["category"] as? String) ?? (item["cat"] as? String) ?? (item["kind"] as? String) ?? ""
+            let status = (item["status"] as? String) ?? ""
             let latest = (item["lastChapter"] as? String)
                 ?? (item["latestChapter"] as? String)
                 ?? (item["newChapter"] as? String)
@@ -930,6 +1027,8 @@ nonisolated struct RuleBasedBookCatalog: IncrementalBookCatalog {
                 title: title,
                 author: author,
                 summary: summary,
+                category: category,
+                status: status,
                 coverURL: cover,
                 latestChapter: LatestChapterLabel.clean(latest)
             ))

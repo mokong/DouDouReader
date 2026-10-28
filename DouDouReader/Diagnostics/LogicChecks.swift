@@ -60,6 +60,7 @@ enum LogicChecks {
         checkSpeechRateMenu(&errors)
         checkTypography(&errors)
         checkLineSpacingConsistency(&errors)
+        checkBookCoverAndXiangSeEnhancements(&errors)
         if BookLibrary.hash("豆豆").count != 64 {
             errors.append("内容哈希长度不对")
         }
@@ -3192,6 +3193,194 @@ enum LogicChecks {
         }
         if ReadingThemes.choices.count < 8 {
             errors.append("阅读主题: 香色色板数量不足 \(ReadingThemes.choices.count)")
+        }
+    }
+
+    private static func checkBookCoverAndXiangSeEnhancements(_ errors: inout [String]) {
+        // 1. 占位图过滤与懒加载属性封面提取
+        if !RuleBasedBookCatalog.isPlaceholderCover("https://example.com/images/nocover.jpg")
+            || !RuleBasedBookCatalog.isPlaceholderCover("/static/default_cover.png")
+            || RuleBasedBookCatalog.isPlaceholderCover("https://example.com/files/article/image/12/12345/12345s.jpg") {
+            errors.append("封面占位图过滤判定不符")
+        }
+
+        // 2. 香色闺阁 bookDetail + 分类/状态 + replace 净化规则解析
+        let xiangseJSON = """
+        {
+          "sourceName": "香色详情测试",
+          "sourceUrl": "https://xs.test",
+          "searchBook": {
+            "requestInfo": "/s?q=%@keyWord",
+            "list": "//li",
+            "bookName": "//a/text()",
+            "author": "//span[@class='author']/text()",
+            "detailUrl": "//a/@href",
+            "cover": "//img/@data-original",
+            "cat": "//span[@class='cat']/text()",
+            "status": "//span[@class='status']/text()"
+          },
+          "bookDetail": {
+            "bookName": "//h1/text()",
+            "author": "//div[@class='author']/text()",
+            "cover": "//div[@id='fmimg']//img/@data-original",
+            "tocUrl": "//a[@class='more']/@href"
+          },
+          "chapterList": {
+            "list": "//div[@id='list']//a",
+            "title": "text",
+            "url": "href"
+          },
+          "chapterContent": {
+            "content": "//div[@id='content']/text()",
+            "replace": "记住本站.*?##\\n广告水印##"
+          }
+        }
+        """
+        do {
+            let parsed = try BookSourceParser.parse(text: xiangseJSON)
+            guard let source = parsed.first else {
+                errors.append("香色详情测试源解析为空")
+                return
+            }
+            if source.searchRule.categorySelector != "//span[@class='cat']/text()"
+                || source.searchRule.statusSelector != "//span[@class='status']/text()" {
+                errors.append("香色搜索分类或状态选择器未解析")
+            }
+            if source.tocRule.infoCoverSelector != "//div[@id='fmimg']//img/@data-original"
+                || source.tocRule.tocURLSelector != "//a[@class='more']/@href" {
+                errors.append("香色 bookDetail 封面或目录选择器未解析")
+            }
+            if source.contentRule.replaceRules.count != 2 {
+                errors.append("香色 chapterContent.replace 净化规则未解析 \(source.contentRule.replaceRules)")
+            }
+        } catch {
+            errors.append("香色详情测试 JSON 解析失败 \(error)")
+        }
+
+        // 3. 搜索懒加载封面（data-original 回退跳过 nocover.jpg）与详情页 og:image 封面提取
+        let coverOutcome = finishAsync { () -> (searchCover: String, category: String, status: String, openingCover: String) in
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [CatalogURLStub.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+
+            let searchHTML = """
+            <ul id="result">
+              <li>
+                <a href="/book/77">星海来信</a>
+                <span class="author">林海</span>
+                <span class="cat">科幻</span>
+                <span class="status">连载</span>
+                <img src="/static/nocover.jpg" data-original="/covers/77.jpg"/>
+              </li>
+            </ul>
+            """
+            let detailHTML = """
+            <html><head><meta property="og:image" content="https://cover.test/img/77-hd.jpg"/></head>
+            <body>
+              <h1>星海来信</h1>
+              <span class="author">林海</span>
+              <div class="chapters"><a href="/book/77/1">第一章 启航</a></div>
+            </body></html>
+            """
+            let chapterHTML = "<div id=\"content\">星海浩瀚。</div>"
+            CatalogURLStub.setRoutes([
+                "/search": (200, Data(searchHTML.utf8)),
+                "/book/77": (200, Data(detailHTML.utf8)),
+                "/book/77/1": (200, Data(chapterHTML.utf8))
+            ])
+
+            let source = UniversalBookSource(
+                kind: .legado,
+                name: "封面测试源",
+                sourceURL: "https://cover.test",
+                searchRule: SourceSearchRule(
+                    urlTemplate: "https://cover.test/search?q={{key}}",
+                    listSelector: "//ul[@id='result']/li",
+                    nameSelector: "//a/text()",
+                    authorSelector: "//span[@class='author']/text()",
+                    detailURLSelector: "//a/@href",
+                    coverSelector: "//img/@src",
+                    categorySelector: "//span[@class='cat']/text()",
+                    statusSelector: "//span[@class='status']/text()"
+                ),
+                tocRule: SourceTocRule(
+                    listSelector: "//div[@class='chapters']/a",
+                    nameSelector: "text",
+                    urlSelector: "href"
+                ),
+                contentRule: SourceContentRule(contentSelector: "//div[@id='content']/text()")
+            )
+            let catalog = RuleBasedBookCatalog(recordID: "cover-test", source: source, session: session)
+            let books = try await catalog.search(query: "星海")
+            let first = books.first
+            let opening = try await catalog.fetchOpening(bookID: "/book/77")
+            return (
+                first?.coverURL ?? "",
+                first?.category ?? "",
+                first?.status ?? "",
+                opening.coverURL
+            )
+        }
+        switch coverOutcome {
+        case .failure(let err):
+            errors.append("封面与懒加载测试失败 \(err)")
+        case .success(let res):
+            if res.searchCover != "https://cover.test/covers/77.jpg" {
+                errors.append("搜索懒加载封面未能跳过 nocover 占位图并取 data-original: \(res.searchCover)")
+            }
+            if res.category != "科幻" || res.status != "连载" {
+                errors.append("搜索分类或连载状态提取不符: \(res.category) / \(res.status)")
+            }
+            if res.openingCover != "https://cover.test/img/77-hd.jpg" {
+                errors.append("详情页 og:image 封面提取不符: \(res.openingCover)")
+            }
+        }
+
+        // 4. EPUB 内嵌封面提取与本地封面读写
+        let fakeCoverBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02, 0x03, 0x04])
+        let container = """
+        <?xml version="1.0"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="OEBPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles>
+        </container>
+        """
+        let opf = """
+        <?xml version="1.0"?>
+        <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+          <metadata>
+            <dc:title>带封面的书</dc:title>
+            <dc:creator>画师</dc:creator>
+            <meta name="cover" content="cover-img"/>
+          </metadata>
+          <manifest>
+            <item id="cover-img" href="images/cover.png" media-type="image/png"/>
+            <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine><itemref idref="c1"/></spine>
+        </package>
+        """
+        let c1 = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><h1>第一章</h1><p>正文内容。</p></body></html>"
+        let epubData = zipParts([
+            ZipPart(name: "mimetype", plain: Data("application/epub+zip".utf8)),
+            ZipPart(name: "META-INF/container.xml", plain: Data(container.utf8)),
+            ZipPart(name: "OEBPS/book.opf", plain: Data(opf.utf8)),
+            ZipPart(name: "OEBPS/images/cover.png", plain: fakeCoverBytes),
+            ZipPart(name: "OEBPS/c1.xhtml", plain: Data(c1.utf8))
+        ])
+        do {
+            let parsed = try EpubParser.parse(epubData)
+            if parsed.coverData != fakeCoverBytes {
+                errors.append("EPUB 2 meta cover 封面数据未提取")
+            }
+            let tempFileName = "cover-test-\(UUID().uuidString).txt"
+            defer { BookStorage.delete(fileName: tempFileName) }
+            BookStorage.writeCover(fakeCoverBytes, for: tempFileName)
+            if !BookStorage.hasCover(fileName: tempFileName) || BookStorage.readCover(fileName: tempFileName) != fakeCoverBytes {
+                errors.append("本地封面文件写入或读取不一致")
+            }
+        } catch {
+            errors.append("EPUB 封面提取测试失败 \(error)")
         }
     }
 }

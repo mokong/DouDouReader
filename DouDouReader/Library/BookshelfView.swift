@@ -1,6 +1,11 @@
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
+#if os(iOS) || os(visionOS)
+import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 enum ShelfDestination: Hashable {
     case book(UUID)
@@ -566,6 +571,10 @@ struct BookshelfView: View {
             let local = RemoteChapterList.decode(book.remoteChapterList)
             let outcome = BookUpdateComparison.compare(local: local, remote: toc.chapters)
             book.remoteChapterList = RemoteChapterList.encode(toc.chapters)
+            if book.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !toc.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                book.coverURL = toc.coverURL
+            }
             book.updateAvailable = outcome.hasUpdate
             book.newChapterCount = outcome.newChapterCount
             book.latestRemoteChapterTitle = outcome.latestTitle
@@ -607,6 +616,7 @@ struct BookshelfView: View {
             var id: UUID
             var title: String
             var chapters: [RemoteChapterRef]?
+            var coverURL: String = ""
             var errorMessage: String?
         }
 
@@ -636,7 +646,7 @@ struct BookshelfView: View {
                     }
                     do {
                         let toc = try await catalog.fetchTOC(bookID: item.remoteBookID)
-                        return BookUpdateResult(id: item.id, title: item.title, chapters: toc.chapters, errorMessage: nil)
+                        return BookUpdateResult(id: item.id, title: item.title, chapters: toc.chapters, coverURL: toc.coverURL, errorMessage: nil)
                     } catch {
                         return BookUpdateResult(id: item.id, title: item.title, chapters: nil, errorMessage: Self.friendlyCheckError(error))
                     }
@@ -654,6 +664,10 @@ struct BookshelfView: View {
                         let local = RemoteChapterList.decode(book.remoteChapterList)
                         let outcome = BookUpdateComparison.compare(local: local, remote: remoteChapters)
                         book.remoteChapterList = RemoteChapterList.encode(remoteChapters)
+                        if book.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                           !res.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            book.coverURL = res.coverURL
+                        }
                         book.updateAvailable = outcome.hasUpdate
                         book.newChapterCount = outcome.newChapterCount
                         book.latestRemoteChapterTitle = outcome.latestTitle
@@ -804,6 +818,42 @@ struct BookCover: View {
     var body: some View {
         let width: CGFloat = compact ? 46 : 108
         let height: CGFloat = compact ? 66 : 154
+        ZStack(alignment: .topLeading) {
+            BookCoverImageView(coverURL: book.coverURL, fileName: book.fileName) {
+                fallbackCover
+            }
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(alignment: .leading) {
+                // 书脊立体折痕阴影
+                LinearGradient(
+                    colors: [.black.opacity(0.28), .white.opacity(0.10), .clear],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(width: compact ? 5 : 10)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .allowsHitTesting(false)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(.black.opacity(0.08), lineWidth: 0.5)
+            }
+
+            if book.isPinned && !compact {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.white)
+                    .padding(5)
+                    .background(.black.opacity(0.38), in: Circle())
+                    .padding(6)
+            }
+        }
+        .frame(width: width, height: height)
+        .shadow(color: .black.opacity(0.14), radius: 6, y: 3)
+    }
+
+    private var fallbackCover: some View {
         ZStack(alignment: .bottomLeading) {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color(hue: book.coverHue, saturation: 0.45, brightness: 0.62))
@@ -812,11 +862,7 @@ struct BookCover: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             VStack(alignment: .leading, spacing: 4) {
-                if book.isPinned && !compact {
-                    Image(systemName: "pin.fill").font(.caption2)
-                }
                 Spacer(minLength: 0)
                 Text(book.title)
                     .font(compact ? .system(size: 8, weight: .semibold) : .subheadline.weight(.semibold))
@@ -825,8 +871,150 @@ struct BookCover: View {
             .foregroundStyle(.white)
             .padding(compact ? 4 : 8)
         }
-        .frame(width: width, height: height)
-        .shadow(color: .black.opacity(0.14), radius: 6, y: 3)
+    }
+}
+
+/// 跨書架、发现页、搜索页复用的封面加载器：
+/// 1. 支持本地 EPUB/已落盘封面（`BookStorage.readCover`）
+/// 2. 支持远程封面并自动附带 `Referer` 与浏览器 `User-Agent`，突破小说站图片防盗链
+/// 3. 内存 `NSCache` + 书架本地磁盘双层缓存
+enum BookCoverLoader {
+    #if os(iOS) || os(visionOS)
+    typealias PlatformImage = UIImage
+    #elseif os(macOS)
+    typealias PlatformImage = NSImage
+    #endif
+
+    nonisolated(unsafe) private static let memoryCache: NSCache<NSString, PlatformImage> = {
+        let cache = NSCache<NSString, PlatformImage>()
+        cache.countLimit = 240
+        return cache
+    }()
+
+    nonisolated static func cacheKey(coverURL: String, fileName: String) -> String {
+        let trimmedURL = coverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedURL.isEmpty {
+            return trimmedURL
+        }
+        if !fileName.isEmpty {
+            return "local://\(fileName)"
+        }
+        return ""
+    }
+
+    static func cachedImage(coverURL: String, fileName: String) -> Image? {
+        let key = cacheKey(coverURL: coverURL, fileName: fileName)
+        guard !key.isEmpty, let platform = memoryCache.object(forKey: key as NSString) else {
+            return nil
+        }
+        return swiftUIImage(from: platform)
+    }
+
+    static func loadImage(coverURL: String, fileName: String) async -> Image? {
+        let key = cacheKey(coverURL: coverURL, fileName: fileName)
+        guard !key.isEmpty else { return nil }
+        if let cached = memoryCache.object(forKey: key as NSString) {
+            return swiftUIImage(from: cached)
+        }
+
+        let trimmedURL = coverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let localFile: String = {
+            if !fileName.isEmpty { return fileName }
+            if trimmedURL.hasPrefix("local://") {
+                return String(trimmedURL.dropFirst("local://".count))
+            }
+            return ""
+        }()
+
+        return await Task.detached(priority: .utility) { () -> Image? in
+            if !localFile.isEmpty,
+               let data = BookStorage.readCover(fileName: localFile),
+               let platform = makePlatformImage(from: data) {
+                memoryCache.setObject(platform, forKey: key as NSString)
+                return swiftUIImage(from: platform)
+            }
+
+            guard !trimmedURL.isEmpty,
+                  !trimmedURL.hasPrefix("local://"),
+                  !RuleBasedBookCatalog.isPlaceholderCover(trimmedURL),
+                  let url = URL(string: trimmedURL),
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else {
+                return nil
+            }
+
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 12
+            request.setValue(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+                forHTTPHeaderField: "User-Agent"
+            )
+            request.setValue("image/avif,image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            if let host = url.host {
+                request.setValue("\(scheme)://\(host)/", forHTTPHeaderField: "Referer")
+            }
+
+            guard let (data, response) = try? await RuleBasedBookCatalog.configuredSession.data(for: request),
+                  let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  data.count >= 64,
+                  let platform = makePlatformImage(from: data) else {
+                return nil
+            }
+
+            memoryCache.setObject(platform, forKey: key as NSString)
+            if !localFile.isEmpty {
+                BookStorage.writeCover(data, for: localFile)
+            }
+            return swiftUIImage(from: platform)
+        }.value
+    }
+
+    nonisolated private static func makePlatformImage(from data: Data) -> PlatformImage? {
+        #if os(iOS) || os(visionOS)
+        return UIImage(data: data)
+        #elseif os(macOS)
+        return NSImage(data: data)
+        #endif
+    }
+
+    nonisolated private static func swiftUIImage(from platform: PlatformImage) -> Image {
+        #if os(iOS) || os(visionOS)
+        return Image(uiImage: platform)
+        #elseif os(macOS)
+        return Image(nsImage: platform)
+        #endif
+    }
+}
+
+struct BookCoverImageView<Fallback: View>: View {
+    var coverURL: String
+    var fileName: String = ""
+    @ViewBuilder var fallback: () -> Fallback
+
+    @State private var loadedImage: Image?
+
+    var body: some View {
+        let activeImage = loadedImage ?? BookCoverLoader.cachedImage(coverURL: coverURL, fileName: fileName)
+        GeometryReader { proxy in
+            if let activeImage {
+                activeImage
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+            } else {
+                fallback()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+            }
+        }
+        .task(id: BookCoverLoader.cacheKey(coverURL: coverURL, fileName: fileName)) {
+            if let cached = BookCoverLoader.cachedImage(coverURL: coverURL, fileName: fileName) {
+                loadedImage = cached
+                return
+            }
+            loadedImage = await BookCoverLoader.loadImage(coverURL: coverURL, fileName: fileName)
+        }
     }
 }
 

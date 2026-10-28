@@ -38,6 +38,8 @@ nonisolated struct OnlineOpening: Sendable {
     var chapters: [RemoteChapterRef]
     /// 打开时已经下载的第一章正文，不含书名和作者行。
     var openingBody: String = ""
+    /// 详情页或列表里的书籍封面地址。
+    var coverURL: String = ""
 }
 
 /// 轻量目录拉取结果：只含目录元数据，不含任何章节正文，用于书架检查更新。
@@ -45,6 +47,7 @@ nonisolated struct OnlineTOC: Sendable {
     var title: String
     var author: String
     var chapters: [RemoteChapterRef]
+    var coverURL: String = ""
 }
 
 nonisolated struct CatalogBook: Identifiable, Equatable, Sendable {
@@ -157,7 +160,13 @@ nonisolated enum CatalogParser {
     static func books(from data: Data) throws -> [CatalogBook] {
         let list = try decode(CatalogListPayload.self, from: data)
         return list.books.map {
-            CatalogBook(id: $0.id, title: $0.title, author: $0.author ?? "", summary: $0.summary ?? "")
+            CatalogBook(
+                id: $0.id,
+                title: $0.title,
+                author: $0.author ?? "",
+                summary: $0.summary ?? "",
+                coverURL: $0.coverURL ?? $0.cover ?? ""
+            )
         }
     }
 
@@ -168,6 +177,7 @@ nonisolated enum CatalogParser {
             title: payload.title,
             author: payload.author ?? "",
             summary: payload.summary ?? "",
+            coverURL: payload.coverURL ?? payload.cover ?? "",
             chapters: payload.chapters.map { CatalogChapterRef(id: $0.id, title: $0.title) }
         )
     }
@@ -190,6 +200,7 @@ nonisolated struct CatalogDetail: Sendable {
     var title: String
     var author: String
     var summary: String
+    var coverURL: String = ""
     var chapters: [CatalogChapterRef]
 }
 
@@ -213,6 +224,8 @@ private nonisolated struct CatalogBookPayload: Decodable {
     var title: String
     var author: String?
     var summary: String?
+    var cover: String?
+    var coverURL: String?
 }
 
 private nonisolated struct CatalogDetailPayload: Decodable {
@@ -220,6 +233,8 @@ private nonisolated struct CatalogDetailPayload: Decodable {
     var title: String
     var author: String?
     var summary: String?
+    var cover: String?
+    var coverURL: String?
     var chapters: [CatalogChapterPayload]
 }
 
@@ -269,7 +284,7 @@ extension IncrementalBookCatalog {
     /// 默认实现复用 fetchOpening（会多下第一章正文）。规则书源与原生 API 应覆盖为轻量目录拉取。
     func fetchTOC(bookID: String) async throws -> OnlineTOC {
         let opening = try await fetchOpening(bookID: bookID)
-        return OnlineTOC(title: opening.title, author: opening.author, chapters: opening.chapters)
+        return OnlineTOC(title: opening.title, author: opening.author, chapters: opening.chapters, coverURL: opening.coverURL)
     }
 }
 
@@ -352,7 +367,8 @@ nonisolated struct RemoteBookCatalog: IncrementalBookCatalog {
             author: detail.author,
             text: text,
             chapters: refs,
-            openingBody: body.content
+            openingBody: body.content,
+            coverURL: detail.coverURL
         )
     }
 
@@ -377,7 +393,8 @@ nonisolated struct RemoteBookCatalog: IncrementalBookCatalog {
         return OnlineTOC(
             title: title.isEmpty ? "未命名" : title,
             author: detail.author,
-            chapters: refs
+            chapters: refs,
+            coverURL: detail.coverURL
         )
     }
 

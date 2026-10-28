@@ -32,6 +32,8 @@ nonisolated struct SourceExploreRule: Codable, Sendable, Equatable {
     var detailURLSelector: String = ""
     var summarySelector: String = ""
     var coverSelector: String = ""
+    var categorySelector: String = ""
+    var statusSelector: String = ""
 
     nonisolated init(
         urlTemplate: String = "",
@@ -40,7 +42,9 @@ nonisolated struct SourceExploreRule: Codable, Sendable, Equatable {
         authorSelector: String = "",
         detailURLSelector: String = "",
         summarySelector: String = "",
-        coverSelector: String = ""
+        coverSelector: String = "",
+        categorySelector: String = "",
+        statusSelector: String = ""
     ) {
         self.urlTemplate = urlTemplate
         self.listSelector = listSelector
@@ -49,6 +53,40 @@ nonisolated struct SourceExploreRule: Codable, Sendable, Equatable {
         self.detailURLSelector = detailURLSelector
         self.summarySelector = summarySelector
         self.coverSelector = coverSelector
+        self.categorySelector = categorySelector
+        self.statusSelector = statusSelector
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case urlTemplate, listSelector, nameSelector, authorSelector
+        case detailURLSelector, summarySelector, coverSelector
+        case categorySelector, statusSelector
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        urlTemplate = try container.decodeIfPresent(String.self, forKey: .urlTemplate) ?? ""
+        listSelector = try container.decodeIfPresent(String.self, forKey: .listSelector) ?? ""
+        nameSelector = try container.decodeIfPresent(String.self, forKey: .nameSelector) ?? ""
+        authorSelector = try container.decodeIfPresent(String.self, forKey: .authorSelector) ?? ""
+        detailURLSelector = try container.decodeIfPresent(String.self, forKey: .detailURLSelector) ?? ""
+        summarySelector = try container.decodeIfPresent(String.self, forKey: .summarySelector) ?? ""
+        coverSelector = try container.decodeIfPresent(String.self, forKey: .coverSelector) ?? ""
+        categorySelector = try container.decodeIfPresent(String.self, forKey: .categorySelector) ?? ""
+        statusSelector = try container.decodeIfPresent(String.self, forKey: .statusSelector) ?? ""
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(urlTemplate, forKey: .urlTemplate)
+        try container.encode(listSelector, forKey: .listSelector)
+        try container.encode(nameSelector, forKey: .nameSelector)
+        try container.encode(authorSelector, forKey: .authorSelector)
+        try container.encode(detailURLSelector, forKey: .detailURLSelector)
+        try container.encode(summarySelector, forKey: .summarySelector)
+        try container.encode(coverSelector, forKey: .coverSelector)
+        try container.encode(categorySelector, forKey: .categorySelector)
+        try container.encode(statusSelector, forKey: .statusSelector)
     }
 }
 
@@ -165,6 +203,10 @@ nonisolated struct SourceSearchRule: Codable, Sendable, Equatable {
     var coverSelector: String = ""
     /// 搜索结果里的最新章节（阅读 3.0 的 lastChapter，香色闺阁的 lastChapter）。
     var lastChapterSelector: String = ""
+    /// 分类选择器（阅读 3.0 的 kind，香色闺阁的 cat/category）。
+    var categorySelector: String = ""
+    /// 连载状态选择器（香色闺阁的 status）。
+    var statusSelector: String = ""
 
     nonisolated init(
         urlTemplate: String = "",
@@ -177,7 +219,9 @@ nonisolated struct SourceSearchRule: Codable, Sendable, Equatable {
         detailURLSelector: String = "",
         summarySelector: String = "",
         coverSelector: String = "",
-        lastChapterSelector: String = ""
+        lastChapterSelector: String = "",
+        categorySelector: String = "",
+        statusSelector: String = ""
     ) {
         self.urlTemplate = urlTemplate
         self.httpMethod = httpMethod
@@ -190,12 +234,15 @@ nonisolated struct SourceSearchRule: Codable, Sendable, Equatable {
         self.summarySelector = summarySelector
         self.coverSelector = coverSelector
         self.lastChapterSelector = lastChapterSelector
+        self.categorySelector = categorySelector
+        self.statusSelector = statusSelector
     }
 
     private enum CodingKeys: String, CodingKey {
         case urlTemplate, httpMethod, postBody, headers
         case listSelector, nameSelector, authorSelector, detailURLSelector
         case summarySelector, coverSelector, lastChapterSelector
+        case categorySelector, statusSelector
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -211,6 +258,8 @@ nonisolated struct SourceSearchRule: Codable, Sendable, Equatable {
         summarySelector = try container.decodeIfPresent(String.self, forKey: .summarySelector) ?? ""
         coverSelector = try container.decodeIfPresent(String.self, forKey: .coverSelector) ?? ""
         lastChapterSelector = try container.decodeIfPresent(String.self, forKey: .lastChapterSelector) ?? ""
+        categorySelector = try container.decodeIfPresent(String.self, forKey: .categorySelector) ?? ""
+        statusSelector = try container.decodeIfPresent(String.self, forKey: .statusSelector) ?? ""
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -226,6 +275,8 @@ nonisolated struct SourceSearchRule: Codable, Sendable, Equatable {
         try container.encode(summarySelector, forKey: .summarySelector)
         try container.encode(coverSelector, forKey: .coverSelector)
         try container.encode(lastChapterSelector, forKey: .lastChapterSelector)
+        try container.encode(categorySelector, forKey: .categorySelector)
+        try container.encode(statusSelector, forKey: .statusSelector)
     }
 }
 
@@ -241,10 +292,12 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
     var urlSelector: String = ""
     /// 目录最前面是最新章节横幅时，从第一次出现的第1章接着读，并把横幅里多出来的章补到末尾。
     var startAtFirstChapter: Bool = false
-    /// 详情页书名选择器（来自 ruleBookInfo.name），为空时回退硬编码 //h1。
+    /// 详情页书名选择器（来自 ruleBookInfo.name 或 bookDetail.bookName），为空时回退硬编码 //h1。
     var infoNameSelector: String = ""
-    /// 详情页作者选择器（来自 ruleBookInfo.author），为空时回退硬编码 //span[@class='author']。
+    /// 详情页作者选择器（来自 ruleBookInfo.author 或 bookDetail.author），为空时回退硬编码 //span[@class='author']。
     var infoAuthorSelector: String = ""
+    /// 详情页封面选择器（来自 ruleBookInfo.coverUrl 或 bookDetail.cover）。
+    var infoCoverSelector: String = ""
 
     nonisolated init(
         tocURLSelector: String = "",
@@ -253,7 +306,8 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         urlSelector: String = "",
         startAtFirstChapter: Bool = false,
         infoNameSelector: String = "",
-        infoAuthorSelector: String = ""
+        infoAuthorSelector: String = "",
+        infoCoverSelector: String = ""
     ) {
         self.tocURLSelector = tocURLSelector
         self.listSelector = listSelector
@@ -262,11 +316,12 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         self.startAtFirstChapter = startAtFirstChapter
         self.infoNameSelector = infoNameSelector
         self.infoAuthorSelector = infoAuthorSelector
+        self.infoCoverSelector = infoCoverSelector
     }
 
     private enum CodingKeys: String, CodingKey {
         case tocURLSelector, listSelector, nameSelector, urlSelector, startAtFirstChapter
-        case infoNameSelector, infoAuthorSelector
+        case infoNameSelector, infoAuthorSelector, infoCoverSelector
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -278,6 +333,7 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         startAtFirstChapter = try container.decodeIfPresent(Bool.self, forKey: .startAtFirstChapter) ?? false
         infoNameSelector = try container.decodeIfPresent(String.self, forKey: .infoNameSelector) ?? ""
         infoAuthorSelector = try container.decodeIfPresent(String.self, forKey: .infoAuthorSelector) ?? ""
+        infoCoverSelector = try container.decodeIfPresent(String.self, forKey: .infoCoverSelector) ?? ""
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -289,6 +345,7 @@ nonisolated struct SourceTocRule: Codable, Sendable, Equatable {
         try container.encode(startAtFirstChapter, forKey: .startAtFirstChapter)
         try container.encode(infoNameSelector, forKey: .infoNameSelector)
         try container.encode(infoAuthorSelector, forKey: .infoAuthorSelector)
+        try container.encode(infoCoverSelector, forKey: .infoCoverSelector)
     }
 }
 

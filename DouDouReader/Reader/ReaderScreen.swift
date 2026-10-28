@@ -1630,6 +1630,7 @@ struct ReaderScreen: View {
             }
             let listedAuthor = hit.author.trimmingCharacters(in: .whitespacesAndNewlines)
             let author = book.author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? listedAuthor : book.author
+            let resolvedCover = opening.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? hit.coverURL : opening.coverURL
             _ = try BookLibrary.importOnline(
                 text: opening.text,
                 suggestedTitle: book.title,
@@ -1638,6 +1639,7 @@ struct ReaderScreen: View {
                 remoteSourceID: source.id,
                 chapters: opening.chapters,
                 openingBody: opening.openingBody,
+                coverURL: resolvedCover,
                 context: modelContext
             )
             await reloadReader()

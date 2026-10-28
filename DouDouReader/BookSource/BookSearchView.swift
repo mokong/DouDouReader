@@ -398,7 +398,8 @@ struct BookSearchView: View {
                 sourceName: "书架",
                 shelfBookID: book.id,
                 sourceID: nil,
-                remoteBookID: book.remoteBookID
+                remoteBookID: book.remoteBookID,
+                coverURL: book.coverURL
             )
         }
     }
@@ -412,7 +413,14 @@ struct BookSearchView: View {
             for book in batch.books {
                 let key = (book.title + "|" + book.author).lowercased()
                 hitCount[key, default: 0] += 1
-                guard rowsByKey[key] == nil else { continue }
+                if let existing = rowsByKey[key] {
+                    if existing.coverURL.isEmpty && !book.coverURL.isEmpty {
+                        var updated = existing
+                        updated.coverURL = book.coverURL
+                        rowsByKey[key] = updated
+                    }
+                    continue
+                }
                 let row = SearchRow(
                     id: "\(batch.sourceID)\n\(book.id)",
                     title: book.title,
@@ -588,6 +596,11 @@ struct BookSearchView: View {
             status = ""
         }
         if let existing = BookLibrary.existingRemote(bookID: remoteID, context: modelContext) {
+            if existing.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !row.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                existing.coverURL = row.coverURL
+                try? modelContext.save()
+            }
             onOpen(existing.id)
             return
         }
@@ -600,6 +613,7 @@ struct BookSearchView: View {
         do {
             let opening = try await catalog.fetchOpening(bookID: remoteID)
             let importedTitle = opening.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedCover = opening.coverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? row.coverURL : opening.coverURL
             let imported = try BookLibrary.importOnline(
                 text: opening.text,
                 suggestedTitle: importedTitle.isEmpty ? row.title : importedTitle,
@@ -608,6 +622,7 @@ struct BookSearchView: View {
                 remoteSourceID: sourceID,
                 chapters: opening.chapters,
                 openingBody: opening.openingBody,
+                coverURL: resolvedCover,
                 context: modelContext
             )
             let listedAuthor = row.author.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -649,23 +664,10 @@ private struct SearchCover: View {
         ZStack(alignment: .bottomLeading) {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color(hue: BookMetadata.coverHue(for: title), saturation: 0.45, brightness: 0.62))
-            if let url = URL(string: coverURL) {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .empty:
-                        ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-                    case .failure:
-                        coverLabel
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    @unknown default:
-                        coverLabel
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            } else {
+            BookCoverImageView(coverURL: coverURL) {
                 coverLabel
             }
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .frame(width: 46, height: 66)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
