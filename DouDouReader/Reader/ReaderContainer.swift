@@ -119,8 +119,29 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         _ target: ReaderPosition,
         revision: Int,
         animated: Bool,
+        force: Bool = false,
         in pageController: UIPageViewController
     ) {
+        // 只是排版版本变了、页没变（在线书预取成功、后台排完整章都会这样）：
+        // 不换视图控制器，就地按新排版重画。否则一次点按会连着落 3~4 次页，
+        // 排队滚动有机会多走一页，读者看到的就是点一下翻两张。
+        if target == displayed,
+           let visible = pageController.viewControllers?.first as? PageContentController {
+            appliedRevision = revision
+            let laid = engine.layout(forChapter: target.chapterIndex, coveringPage: target.pageIndex)
+            visible.refresh(layout: laid, textRect: textRect, theme: theme, fontName: settings.fontName)
+            if visible.position == engine.position {
+                visible.setHighlight(engine.highlightRange, color: highlightColor)
+            }
+            return
+        }
+        // 转场收尾时内部排队滚动会先停在 0 / 两页宽，再异步回中到一页宽。
+        // 这个窗口里 setViewControllers 会让它按 direction 再走一页，屏幕上就多翻一张。
+        guard force || pagerAtRest else {
+            deferApply(target, revision: revision, animated: animated)
+            return
+        }
+        cancelDeferredApply()
         let direction = direction(from: displayed, to: target)
         displayed = target
         appliedRevision = revision
@@ -132,24 +153,83 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         flow.beginAnimated()
         armSettleWatchdog()
         pageController.setViewControllers([targetVC], direction: direction, animated: true) { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.finishAnimated(targetVC: targetVC, in: pageController)
-            }
+            DispatchQueue.main.async { self?.finishAnimated() }
         }
     }
 
-    private func finishAnimated(targetVC: PageContentController, in pageController: UIPageViewController) {
-        // 只在「这一页仍然是屏幕上那一页」时补落：这次强落是为了压掉转场残留的半页图层，
-        // 若期间手指已经拖到别的页，再落 targetVC 就是把读者往回拽。
-        if !flow.interactive, !isFingerDown, pageController.viewControllers?.first === targetVC {
-            // 方向不参与动画：非动画再落一次，只把 presentation layer 压回终态。
-            pageController.setViewControllers([targetVC], direction: .forward, animated: false, completion: nil)
-        }
+    /// 程序化转场播完。这里刻意不再「补落一次同页」：`.scroll` 样式下收尾时内部滚动
+    /// 还停在两页宽，按 direction 重设同页会把它记成前进一页，下一次翻页就是两张。
+    private func finishAnimated() {
         flow.endAnimated()
         settle()
     }
 
-    /// 占用全部解除后收敛：先按非动画落一次终态，再把排队期间的目标页补上。
+    /// 内部排队滚动视图是否停在静止位（一页宽/高）。取不到时按静止处理，不阻塞翻页。
+    private var pagerAtRest: Bool {
+        guard let scroll = internalScroll(),
+              scroll.bounds.width > 1, scroll.bounds.height > 1,
+              scroll.contentSize.width > 1, scroll.contentSize.height > 1 else { return true }
+        if scroll.contentSize.width > scroll.contentSize.height {
+            return abs(scroll.contentOffset.x - scroll.bounds.width) <= 1
+        }
+        return abs(scroll.contentOffset.y - scroll.bounds.height) <= 1
+    }
+
+    /// `.scroll` 样式的 UIPageViewController 把拖拽与排队滚动都放在内部 UIScrollView 上。
+    private func internalScroll() -> UIScrollView? {
+        var stack: [UIView] = pageController.map { [$0.view] } ?? []
+        while let view = stack.popLast() {
+            if let scroll = view as? UIScrollView { return scroll }
+            stack.append(contentsOf: view.subviews)
+        }
+        return nil
+    }
+
+    private var deferredApply: (position: ReaderPosition, revision: Int, animated: Bool)?
+    private var deferredWork: DispatchWorkItem?
+    private var deferredTries = 0
+
+    private func deferApply(_ target: ReaderPosition, revision: Int, animated: Bool) {
+        deferredApply = (target, revision, animated)
+        guard deferredWork == nil else { return }
+        deferredTries = 0
+        scheduleDeferredApply()
+    }
+
+    private func scheduleDeferredApply() {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deferredWork = nil
+            guard let pageController = self.pageController, let deferred = self.deferredApply else { return }
+            self.deferredTries += 1
+            // 回中通常一两个周期就结束；兜底 0.6 秒后仍不停就强行落页，避免翻页卡住。
+            if !self.pagerAtRest, self.deferredTries < 40 {
+                self.scheduleDeferredApply()
+                return
+            }
+            let forced = !self.pagerAtRest
+            self.deferredApply = nil
+            if self.displayed != deferred.position || self.appliedRevision != deferred.revision {
+                self.apply(
+                    deferred.position,
+                    revision: deferred.revision,
+                    animated: deferred.animated,
+                    force: forced,
+                    in: pageController
+                )
+            }
+        }
+        deferredWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.016, execute: work)
+    }
+
+    private func cancelDeferredApply() {
+        deferredApply = nil
+        deferredWork?.cancel()
+        deferredWork = nil
+    }
+
+    /// 占用全部解除后收敛：把排队期间的目标页补上。
     private func settle() {
         guard !flow.isBusy, let pageController else { return }
         guard !isFingerDown else {
@@ -158,13 +238,15 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
             return
         }
         cancelSettleWatchdog()
-        if let visible = pageController.viewControllers, !visible.isEmpty {
-            pageController.setViewControllers(visible, direction: .forward, animated: false, completion: nil)
-        }
-        if let request = flow.takePending(),
-           // 跟手那一下已经落到位的请求不用再补一遍，否则同页会再翻一次。
-           displayed != request.position || appliedRevision != request.revision {
-            apply(request.position, revision: request.revision, animated: request.animated, in: pageController)
+        if let request = flow.takePending() {
+            // 排队期间手指跟手或后台排版回写都可能又推动过引擎，快照里的 position/revision
+            // 已经过期；按当前引擎状态落位，只沿用当初那一次的动画意图。
+            // 跟手那一下已经落到位的不用再补一遍，否则同页会再翻一次。
+            let target = engine.position
+            let revision = engine.layoutRevision
+            if displayed != target || appliedRevision != revision {
+                apply(target, revision: revision, animated: request.animated, in: pageController)
+            }
         }
         sync()
     }
@@ -191,9 +273,22 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         settleWork = nil
     }
 
+    /// 手指是否还按在页面上。
+    ///
+    /// `.scroll` 样式下 UIPageViewController 的拖拽手势挂在内部 UIScrollView 上，既不在
+    /// `pageController.gestureRecognizers`（实测为空），也不在 `pageController.view.gestureRecognizers`
+    /// （那里只有我们自己的 readerTap）。只查这两处会永远得到 false，跟手保护形同虚设，
+    /// 于是看门狗会在拖拽途中强制落页、收尾回调也会和手指那一段转场叠在一起。
     private var isFingerDown: Bool {
-        let recognizers = (pageController?.gestureRecognizers ?? []) + (pageController?.view.gestureRecognizers ?? [])
-        return recognizers.contains { $0.state == .began || $0.state == .changed }
+        guard let root = pageController?.view else { return false }
+        var stack = [root]
+        while let view = stack.popLast() {
+            if view.gestureRecognizers?.contains(where: { $0.state == .began || $0.state == .changed }) == true {
+                return true
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return false
     }
 
     func pageViewController(
@@ -276,6 +371,7 @@ final class ReaderPagesController: UIViewController, UIPageViewControllerDataSou
         // 旧控制器的转场随它一起没了，占用与排队都不能留到新控制器上。
         flow.reset()
         cancelSettleWatchdog()
+        cancelDeferredApply()
         let style: UIPageViewController.TransitionStyle = mode == .curl ? .pageCurl : .scroll
         let orientation: UIPageViewController.NavigationOrientation = mode == .vertical ? .vertical : .horizontal
         var options: [UIPageViewController.OptionsKey: Any]?
@@ -465,6 +561,13 @@ final class PageContentController: UIViewController {
         canvas.highlight = range
         canvas.highlightColor = color
         canvas.setNeedsDisplay()
+    }
+
+    /// 页没变、排版被换了一版：就地换掉画布上的排版，不重建视图控制器。
+    func refresh(layout: ChapterLayout?, textRect: CGRect, theme: ReadingTheme, fontName: String) {
+        canvas.chapterLayout = layout
+        canvas.pageIndex = position.pageIndex
+        apply(textRect: textRect, theme: theme, fontName: fontName)
     }
 }
 

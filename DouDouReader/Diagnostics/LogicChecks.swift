@@ -30,6 +30,7 @@ enum LogicChecks {
         checkPaginator(&errors)
         checkProvisionalPaging(&errors)
         checkIncrementalExtension(&errors)
+        checkRealisticIncrementalExtension(&errors)
         checkEngine(&errors)
         checkLazyChapter(&errors)
         checkReaderCatalog(&errors)
@@ -357,6 +358,117 @@ enum LogicChecks {
 
         checkSourceOffsets(engine, errors: &errors, label: "长章")
         checkMutableSource(settings: settings, pageSize: pageSize, errors: &errors)
+    }
+
+    /// checkIncrementalExtension 用的是等长段落，掩盖了真实正文的混排：
+    /// 短对白、空行、超长段交错时，逐页续排仍必须给出与一次性排完完全相同的页边界，
+    /// 否则后台整章排版回写缓存会让当前页的正文发生位移。
+    private static func checkRealisticIncrementalExtension(_ errors: inout [String]) {
+        let paragraphs = [
+            "「你到底走不走？」她把伞往他那边推了推，雨点砸在伞面上，密得像谁在头顶撒豆子。",
+            "走。",
+            "",
+            "他没有再说话。街口的路灯亮起来，一盏，又一盏，把积水照成一块块碎掉的镜子。远处有自行车铃响，声音被雨吞掉一半，剩下的那一半落在地上溅开。她忽然想起很多年前那个夏天，也是这样一场雨，也是这样一条看不见尽头的街，只是那时候陪她站着的人不是他。她那时候还以为只要一直走下去，路就会自己把人带到该去的地方。",
+            "……",
+            "「走吧。」",
+            "他终于动了。",
+            "雨小了。",
+            "她说：好。",
+        ]
+        let body = (0..<140).map { paragraphs[$0 % paragraphs.count] }.joined(separator: "\n") + "\n"
+        let settings = ReaderSettingsStore(loadSaved: false)
+        let snapshot = settings.layoutSnapshot(interfaceDark: false)
+        let pageSize = CGSize(width: 350, height: 640)
+        let sourceBodyUTF16 = (body as NSString).length
+
+        func make(maxPages: Int) -> ChapterLayout {
+            ChapterLayouter.layout(
+                title: "第一章 雨夜",
+                body: body,
+                sourceBodyUTF16: sourceBodyUTF16,
+                snapshot: snapshot,
+                theme: ReadingThemes.paper,
+                pageSize: pageSize,
+                maxPages: maxPages
+            )
+        }
+
+        let full = make(maxPages: .max)
+        guard full.isComplete, full.characterRanges.count > ReaderEngine.provisionalFirstPages + 8 else {
+            errors.append("真实正文样本页数不够：\(full.characterRanges.count)")
+            return
+        }
+        let provisional = make(maxPages: ReaderEngine.provisionalFirstPages)
+        guard !provisional.isComplete else {
+            errors.append("真实正文样本不该一次排完")
+            return
+        }
+
+        var crawl = provisional
+        var hops = 0
+        while !crawl.isComplete, hops < 10_000 {
+            crawl = crawl.extended(toPageCount: crawl.pageCount + 1)
+            hops += 1
+        }
+        if !crawl.isComplete {
+            errors.append("真实正文逐页续排没能排完整章")
+        }
+        if crawl.characterRanges != full.characterRanges {
+            let bad = crawl.characterRanges.indices.first { crawl.characterRanges[$0] != full.characterRanges[$0] } ?? -1
+            errors.append("真实正文逐页续排边界与整章排版不同，首个分歧页 \(bad)")
+        }
+        let done = make(maxPages: ReaderEngine.provisionalFirstPages).completed()
+        if done.characterRanges != full.characterRanges {
+            errors.append("真实正文 completed() 与整章排版不等价")
+        }
+
+        // 引擎层：一页一页往后翻，中途权威排版回写，页边界都不能动。
+        let engine = ReaderEngine(
+            text: "第一章 雨夜\n\(body)",
+            fallbackTitle: "测",
+            startOffset: 0,
+            settings: settings
+        )
+        engine.setPageSize(pageSize)
+        guard let head = engine.layout(for: 0), !head.isComplete else {
+            errors.append("真实正文引擎首屏分页没有生效")
+            return
+        }
+        for page in 0..<full.characterRanges.count {
+            guard let laid = engine.layout(forChapter: 0, coveringPage: page) else {
+                errors.append("真实正文第 \(page) 页取不到排版")
+                return
+            }
+            guard laid.covers(page: page) else {
+                errors.append("真实正文第 \(page) 页没被覆盖（只有 \(laid.characterRanges.count) 页）")
+                return
+            }
+            if laid.characterRanges[page] != full.characterRanges[page] {
+                errors.append("真实正文引擎第 \(page) 页边界与整章排版不同：\(laid.characterRanges[page]) / \(full.characterRanges[page])")
+                return
+            }
+        }
+        guard let authoritative = engine.completeLayout(for: 0), authoritative.isComplete else {
+            errors.append("真实正文权威排版没有排完整章")
+            return
+        }
+        if authoritative.characterRanges != full.characterRanges {
+            errors.append("真实正文权威排版与整章排版不同")
+        }
+
+        // 绘制端补偿：每页首行都该从容器顶部起排，否则 origin.y 会把整页正文推上去。
+        for page in full.containers.indices {
+            let glyphs = full.layoutManager.glyphRange(for: full.containers[page])
+            guard glyphs.length > 0 else {
+                errors.append("真实正文第 \(page) 页没有字形")
+                return
+            }
+            let fragment = full.layoutManager.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+            if abs(fragment.minY) > 0.5 {
+                errors.append("真实正文第 \(page) 页首行不在容器顶部：minY=\(fragment.minY)")
+                return
+            }
+        }
     }
 
     /// 正文改用 NSMutableString 存放之后，缓存的字数与每一章的偏移仍要对得上。
